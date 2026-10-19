@@ -1377,8 +1377,7 @@ export default function Composer({
               : isTrial && remaining === 0 ? ['Free prompts are used.', null]
                 : (isTrial || (eligible && usesFreePrompts(pickedModel, effort, fastOn))) && remaining > 0
                   ? [`${remaining} free ${remaining === 1 ? 'prompt' : 'prompts'} left`, isTrial ? 'Runs Opus 5.5 Fast. Sign in to keep going.' : 'Runs Opus 5.5 Fast at low effort.']
-                  : remaining > 0 ? ['Uses your billing team.', 'Free prompts are available in a new Opus 5.5 Fast design.']
-                    : [null, null]
+                  : [null, null]
             return notice && (
               <p role="status" className="absolute bottom-full right-2 mb-2 flex items-center gap-1.5 border bg-background py-1 pl-2 pr-1.5 text-xs leading-4 text-muted-foreground sm:right-3">
                 {notice}

@@ -102,7 +102,7 @@ test('signed-in first paint offers free prompts only for an eligible chat', () =
     if (trialChat) assert.match(markup, /3 free prompts left/)
     else {
       assert.doesNotMatch(markup, /3 free prompts left/)
-      assert.match(markup, /Uses your billing team/)
+      assert.doesNotMatch(markup, /Uses your billing team/)
     }
   }
 })

@@ -247,13 +247,12 @@ test('an exhausted trial says so briefly and its Sign in opens the dialog', asyn
   assert.equal(app.dialog().open, true)
 })
 
-test('signed-in non-trial model settings explain team billing rather than claiming a free prompt', async (t) => {
+test('signed-in non-trial model settings show no notice rather than claiming a free prompt', async (t) => {
   const ui = browser(t)
   const app = mount(t, ui, { ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null }, sessionId: 'draft', freePrompts: 5 })
   await tick()
   app.render()
-  assert.ok(find(app.composerTree(), (node) => node.props?.role === 'status' && /Uses your billing team/.test([].concat(node.props.children)[0])))
-  assert.equal(find(app.composerTree(), (node) => node.props?.role === 'status' && /prompts? left/.test([].concat(node.props.children)[0])), null)
+  assert.equal(find(app.composerTree(), (node) => node.props?.role === 'status'), null)
 })
 
 test('a signed-in user with no free prompts left sees no billing notice', async (t) => {
@@ -283,7 +282,7 @@ test('an existing paid chat cannot claim free prompts; switching chats and new d
   const freeNotice = () => find(app.composerTree(), (node) => node.props?.role === 'status' && /prompts? left/.test([].concat(node.props.children)[0]))
   const rail = () => find(app.tree(), (node) => node.type === Sidebar).props
   assert.equal(freeNotice(), null, 'an exact model match does not make a paid chat eligible')
-  assert.ok(find(app.composerTree(), (node) => node.props?.role === 'status' && /Uses your billing team/.test([].concat(node.props.children)[0])))
+  assert.equal(find(app.composerTree(), (node) => node.props?.role === 'status'), null, 'a paid chat carries no notice')
   rail().onSelect('trial-chat')
   await tick()
   app.render()
