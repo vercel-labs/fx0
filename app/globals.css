@@ -168,6 +168,14 @@ textarea {
   font: inherit;
 }
 
+/* iOS Safari zooms into a focused field under 16px and leaves the page panned. */
+@media (pointer: coarse) {
+  input,
+  textarea {
+    font-size: 16px;
+  }
+}
+
 button:not(:disabled),
 a,
 label,

@@ -198,6 +198,25 @@ export async function warmChat(host: SessionState): Promise<void> {
   agent()
 }
 
+// Prompts this instance has submitted; the first one also pays for loading
+// libfx and creating its agent.
+let instancePrompts = 0
+
+// Milliseconds each stage of a prompt's submission took, in order.
+function promptStages() {
+  const instancePrompt = ++instancePrompts
+  let last = performance.now()
+  const ms: Record<string, number> = {}
+  return {
+    mark(stage: string) {
+      const now = performance.now()
+      ms[`${stage}Ms`] = Math.round(now - last)
+      last = now
+    },
+    done: () => ({ ...ms, instancePrompt }),
+  }
+}
+
 export async function submitPrompt(
   host: SessionState,
   author: string,
@@ -214,7 +233,9 @@ export async function submitPrompt(
   const credential = submitter ?? host.gatewaySession
   const sender = credential && { ...credential }
   if (!funding) assertGenerationCredential({ ...host, gatewaySession: sender })
+  const stages = promptStages()
   const submitted = await journalPrompt(host.id, { author, text, clientId, images, previews }, initial, !!funding)
+  stages.mark('journal')
   log(host.id, 'prompt:submitted', { id: submitted.id, clientId, imageCount: images?.length ?? 0, idle: submitted.idle })
   const id = submitted.id
   try {
@@ -222,21 +243,27 @@ export async function submitPrompt(
     // the running one, no turn can run without its funding record.
     if (funding) await saveTrialCredential(host.id, funding, id)
     else await saveTurnCredential(host.id, sender!, id)
+    stages.mark('credential')
     const stored = await hydrateSession(host)
+    stages.mark('hydrate')
     const { session } = await chatSession(agent(), host, stored?.libfxSessionId ?? null, agentInstructions(host), id, !!funding)
+    stages.mark('bind')
     const input = images?.length ? [{ type: 'text' as const, text: `[${author}] ${text}` }, ...images] : `[${author}] ${text}`
     // prompt() runs the turn in this request; steer() always goes through
     // Vercel Queues, which delays the turn's start by seconds. So a message to
     // an idle chat is a prompt, and only one sent while a turn runs or waits
     // steers it. Images need their own turn: the installed SDK can reapply an
     // image steer as an interruption of the same turn during durable admission.
-    if (images?.length || submitted.idle || submitted.trialChat) {
+    const prompted = !!(images?.length || submitted.idle || submitted.trialChat)
+    if (prompted) {
       const turn = session.prompt(input, { messageId: `m${id}` })
       void turn.result.catch(() => {})
       await turn.accepted
     } else {
       await session.steer(input, { messageId: `m${id}` })
     }
+    stages.mark('accepted')
+    log(host.id, 'prompt:stages', { id, path: prompted ? 'prompt' : 'steer', ...stages.done() })
   } catch (error) {
     log(host.id, 'prompt:rejected', { id, error: errorText(error) })
     await emit(host, { type: 'error', id, turnId: id, text: `prompt rejected: ${errorText(error)}` })

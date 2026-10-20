@@ -9,7 +9,7 @@ import { touchOwnedSession } from '../../../lib/accounts'
 import { checkBotId } from 'botid/server'
 import { trialEnabled, trialIpHash, trialStore, type TrialCredential, type TrialReservation } from '../../../lib/trial'
 import { TRIAL_MODEL, usesFreePrompts } from '../../../lib/trial-policy'
-import { DEFAULT_MODEL } from '../../../lib/session'
+import { DEFAULT_MODEL, log } from '../../../lib/session'
 
 export const maxDuration = 800
 
@@ -24,6 +24,7 @@ async function catalogDesignMd(id: string, name: string): Promise<DesignMdInput>
 }
 
 export const POST = withPromptRoute(async (request, context) => {
+  const started = performance.now()
   const { user, session, existing } = context
   let body: {
     text?: unknown
@@ -115,8 +116,11 @@ export const POST = withPromptRoute(async (request, context) => {
   const clientId = typeof body?.clientId === 'string' ? body.clientId.slice(0, 40) : undefined
   let submitted: { id: number; seq: number; trialChat: boolean }
   let activated: SessionRouteContext
+  const checked = performance.now()
+  let activatedAt = checked
   try {
     activated = await context.activate()
+    activatedAt = performance.now()
     submitted = await submitPrompt(
       activated.host,
       author,
@@ -137,6 +141,13 @@ export const POST = withPromptRoute(async (request, context) => {
   if (reservation) await trialStore().commit(reservation).catch(() => console.error('[fx0] free prompt confirmation failed'))
   const { id, seq } = submitted
   const { host, id: sessionId, created } = activated
+  // Where a prompt's time goes before it is acknowledged, after sign-in.
+  log(sessionId, 'prompt:route', {
+    id, created,
+    checksMs: Math.round(checked - started),
+    activateMs: Math.round(activatedAt - checked),
+    submitMs: Math.round(performance.now() - activatedAt),
+  })
 
   // libfx runs the turn elsewhere; this function copies its stream into the
   // transcript until the chat goes idle, even after the client disconnects.

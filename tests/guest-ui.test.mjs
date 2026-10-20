@@ -534,6 +534,43 @@ test('a send released by chat boot targets the requested chat rather than reserv
   assert.ok(!ui.requests.some(({ url }) => url === '/api/sessions' || url.includes('session=new')))
 })
 
+test('a prompt says sending until the server accepts it, then thinking while its turn starts', async (t) => {
+  t.mock.method(console, 'info', () => {})
+  let respond
+  const accepted = new Promise((resolve) => { respond = resolve })
+  let events
+  const body = new ReadableStream({ start(controller) { events = controller } })
+  const push = (item) => events.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(item)}\n\n`))
+  const emptyStream = () => new Response(new ReadableStream({ start(controller) { controller.close() } }))
+  const ui = browser(t, { '/api/events?session=saved&after=0': emptyStream, '/api/prompt?session=saved': () => accepted })
+  const app = mount(t, ui, {
+    ...guestBoot, user: { id: 'owner', name: 'Owner' }, sessionId: 'saved',
+    sessions: [{ id: 'saved', title: 'Saved', createdAt: 1, lastActivity: 1, busy: false }],
+  })
+  await tick()
+  app.render()
+  const activity = () => find(app.render(), (node) => node.type?.name === 'ActivityLine')?.props.label ?? null
+  const stoppable = () => find(app.tree(), (node) => node.type === Composer).props.busy
+  app.handle().restoreDraft({ text: 'Make it blue', images: [] })
+  app.render()
+  app.send()
+  await tick()
+  assert.equal(activity(), 'sending', 'nothing is stored before the server answers')
+
+  respond(new Response(body, { headers: { 'content-type': 'text/event-stream' } }))
+  await tick()
+  assert.equal(activity(), 'thinking', 'the accepted prompt is stored and its turn is starting')
+  assert.equal(stoppable(), false, 'Stop still waits for the turn to start')
+
+  push({ type: 'user', seq: 1, id: 1, text: 'Make it blue', at: 10 })
+  push({ type: 'turn_start', seq: 2, id: 1, turnId: 1, at: 11 })
+  await tick()
+  await tick()
+  assert.equal(activity(), 'thinking')
+  assert.equal(stoppable(), true)
+  events.close()
+})
+
 test('new design chosen before chat boot cannot be overwritten by its delayed transcript', (t) => {
   const ui = browser(t)
   const app = mount(t, ui, { ...guestBoot, user: { id: 'owner', name: 'Owner' }, sessionId: 'old', events: [{ type: 'user', seq: 1, text: 'Old chat' }] }, { booted: false })
