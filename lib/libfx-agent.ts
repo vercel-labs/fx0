@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createFxAgent, createFxEngine, type FxAgent, type FxAgentHostTool, type FxEffort, type FxHostTool, type FxSession, type FxToolContext } from 'libfx'
 import { createTools, type ToolHost } from './tools'
 import { gatewayFetch, type GatewayError, type DesignDraftObserver } from './gateway-session'
@@ -42,8 +42,20 @@ export interface ChatRuntime {
 // carries. A retry or a crash's resend of a step carries the same conversation, so
 // it has the same name; every new step, even after compaction, has a new one.
 export function modelStepName(sender: string, body: unknown): string {
-  const prompt = (body as { prompt?: unknown } | null)?.prompt ?? null
+  const prompt = (body as { prompt?: unknown } | null)?.prompt
+  // An unreadable conversation counts as a step of its own, never as a resend.
+  if (!Array.isArray(prompt)) return `${sender}:unread:${randomUUID()}`
   return `${sender}:${createHash('sha256').update(JSON.stringify(prompt)).digest('base64url').slice(0, 22)}`
+}
+
+// libfx sends the body as bytes (a Buffer), not a string.
+export function requestJson(body: unknown): unknown {
+  try {
+    if (typeof body === 'string') return JSON.parse(body)
+    if (body instanceof ArrayBuffer) return JSON.parse(new TextDecoder().decode(body))
+    if (ArrayBuffer.isView(body)) return JSON.parse(new TextDecoder().decode(body))
+  } catch { /* libfx validates its own body */ }
+  return null
 }
 
 // Model requests of this conversation so far: the assistant messages after the
@@ -94,10 +106,7 @@ function chatFetch(
     const url = new URL(input instanceof Request ? input.url : String(input))
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
     const modelRequest = method === 'POST' && url.pathname.endsWith('/language-model')
-    let body: unknown = null
-    if (modelRequest && typeof init?.body === 'string') {
-      try { body = JSON.parse(init.body) } catch { /* libfx validates its own body */ }
-    }
+    const body = modelRequest ? requestJson(init?.body) : null
     const limited = () => {
       log(id ?? 'unknown', 'turn:step-limit', { steps: MAX_TURN_MODEL_STEPS, sender: sender === 'parent' ? 'parent' : 'subagent' })
       return jsonError(400, STEP_LIMIT)

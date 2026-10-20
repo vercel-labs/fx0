@@ -159,7 +159,7 @@ function modelRequest(sessionId, prompt = [{ role: 'user', content: [{ type: 'te
   return agentFetch(MODEL_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-session-id': sessionId },
-    body: JSON.stringify({ prompt }),
+    body: Buffer.from(JSON.stringify({ prompt })),
   })
 }
 
@@ -206,6 +206,44 @@ test('the request after a turn\'s 64th model step stops with the step limit, bef
   assert.equal(network.mock.callCount(), 1)
 })
 
+test('the step limit holds for every form a request body can take, and for one that cannot be read', async (t) => {
+  t.after(() => turnSteps.clear())
+  const network = t.mock.method(globalThis, 'fetch', async () => Response.json({}))
+  const conversation = (count) => [
+    { role: 'user', content: [{ type: 'text', text: 'go' }] },
+    ...Array.from({ length: count }, () => [{ role: 'assistant', content: [] }, { role: 'tool', content: [] }]).flat(),
+  ]
+  const forms = {
+    string: (json) => json,
+    buffer: (json) => Buffer.from(json),
+    uint8array: (json) => new Uint8Array(Buffer.from(json)),
+    arraybuffer: (json) => new Uint8Array(Buffer.from(json)).buffer,
+  }
+  let turn = 600
+  for (const [form, encode] of Object.entries(forms)) {
+    stored.set('chat-a', credential('token-a'))
+    agentOptions.hooks?.onEvent({ type: 'journal.restore', sessionId: 'wrun_a', data: { resumable: true, openTurnId: `m${++turn}` } })
+    const over = await agentFetch(MODEL_URL, { method: 'POST', headers: { 'x-session-id': 'wrun_a' }, body: encode(JSON.stringify({ prompt: conversation(MAX_TURN_MODEL_STEPS) })) })
+    assert.equal(over.status, 400, `${form}: a conversation past the limit is refused`)
+    const statuses = []
+    for (let step = 0; step < MAX_TURN_MODEL_STEPS + 6; step++) {
+      const prompt = [...conversation(1), { role: 'user', content: [{ type: 'text', text: `steer ${step}` }] }]
+      statuses.push((await agentFetch(MODEL_URL, { method: 'POST', headers: { 'x-session-id': 'wrun_a' }, body: encode(JSON.stringify({ prompt })) })).status)
+    }
+    assert.equal(statuses.filter((status) => status === 200).length, MAX_TURN_MODEL_STEPS, `${form}: exactly 64 steps of one turn are allowed`)
+    assert.deepEqual(statuses.slice(MAX_TURN_MODEL_STEPS), Array(6).fill(400), `${form}: the rest are refused`)
+  }
+  stored.set('chat-a', credential('token-a'))
+  agentOptions.hooks?.onEvent({ type: 'journal.restore', sessionId: 'wrun_a', data: { resumable: true, openTurnId: `m${++turn}` } })
+  const unreadable = []
+  for (let step = 0; step < MAX_TURN_MODEL_STEPS + 3; step++) {
+    unreadable.push((await agentFetch(MODEL_URL, { method: 'POST', headers: { 'x-session-id': 'wrun_a' }, body: Buffer.from('not json') })).status)
+  }
+  assert.equal(unreadable.filter((status) => status === 200).length, MAX_TURN_MODEL_STEPS)
+  assert.deepEqual(unreadable.slice(MAX_TURN_MODEL_STEPS), [400, 400, 400])
+  assert.ok(network.mock.callCount() > 0)
+})
+
 test('public model metadata goes out without a credential, even with no session', async (t) => {
   stored.clear()
   const seen = []
@@ -243,7 +281,8 @@ test('a model request is named by its sender and conversation, so only a resend 
   assert.notEqual(modelStepName('parent', body), modelStepName('parent', { prompt: [...body.prompt, { role: 'assistant', content: [] }] }))
   // Compaction can shorten a conversation to a length seen before; its content differs.
   assert.notEqual(modelStepName('parent', { prompt: [{ role: 'user', content: 'summary' }] }), modelStepName('parent', { prompt: [{ role: 'user', content: 'go' }] }))
-  assert.equal(modelStepName('parent', {}), modelStepName('parent', null))
+  assert.notEqual(modelStepName('parent', {}), modelStepName('parent', null))
+  assert.match(modelStepName('parent', null), /^parent:unread:/)
   assert.match(modelStepName('parent', body), /^parent:[A-Za-z0-9_-]{22}$/)
 })
 
@@ -269,7 +308,7 @@ test('a turn\'s subagents spend its 64 model requests with it, and a retried req
       const result = (async () => {
         const statuses = []
         for (let step = 0; step < 30; step++) {
-          const response = await options.fetch(MODEL_URL, { method: 'POST', headers: { 'ai-language-model-id': options.model.id }, body: JSON.stringify({ prompt: conversation(step, 'subtask') }) })
+          const response = await options.fetch(MODEL_URL, { method: 'POST', headers: { 'ai-language-model-id': options.model.id }, body: Buffer.from(JSON.stringify({ prompt: conversation(step, 'subtask') })) })
           statuses.push(response.status)
           if (response.status !== 200) break
         }
