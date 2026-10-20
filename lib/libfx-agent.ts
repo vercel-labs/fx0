@@ -49,7 +49,7 @@ export function modelStepName(sender: string, body: unknown): string {
 }
 
 // libfx sends the body as bytes (a Buffer), not a string.
-export function requestJson(body: unknown): unknown {
+function requestJson(body: unknown): unknown {
   try {
     if (typeof body === 'string') return JSON.parse(body)
     if (body instanceof ArrayBuffer) return JSON.parse(new TextDecoder().decode(body))
