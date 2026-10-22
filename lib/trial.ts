@@ -81,8 +81,18 @@ export function trialIpHash(headers: Headers): string {
   const raw = process.env.VERCEL === '1' ? headers.get('x-forwarded-for')?.trim()
     : process.env.NODE_ENV === 'development' ? '127.0.0.1' : null
   if (!raw || !isIP(raw)) throw new AuthError(503, 'Unable to verify the free prompt allowance')
-  const canonical = isIP(raw) === 6 ? new URL(`http://[${raw}]/`).hostname : raw
-  return createHmac('sha256', getSessionOptions().password as string).update(`fx0-trial:${canonical}`).digest('hex')
+  return createHmac('sha256', getSessionOptions().password as string).update(`fx0-trial:${allowanceAddress(raw)}`).digest('hex')
+}
+
+// One IPv6 user controls a whole /64, so the prefix, not the address, shares an allowance.
+export function allowanceAddress(address: string): string {
+  if (isIP(address) !== 6) return address
+  const [head, tail = ''] = new URL(`http://[${address}]/`).hostname.slice(1, -1).split('::')
+  const side = (part: string) => part ? part.split(':') : []
+  const groups = [...side(head), ...Array(8 - side(head).length - side(tail).length).fill('0'), ...side(tail)]
+  const mapped = groups.slice(0, 5).every((group) => Number.parseInt(group, 16) === 0) && groups[5] === 'ffff'
+  if (mapped) return [groups[6], groups[7]].flatMap((group) => [Number.parseInt(group, 16) >> 8, Number.parseInt(group, 16) & 255]).join('.')
+  return `${groups.slice(0, 4).map((group) => group.padStart(4, '0')).join(':')}::/64`
 }
 
 export interface TrialReservation { bucket: string; clientId: string; token: string; remaining: number }

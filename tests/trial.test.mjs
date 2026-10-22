@@ -70,3 +70,29 @@ test('the picker\'s base model with fast on counts as the free-prompt model', as
   assert.equal(usesFreePrompts('anthropic/claude-opus-5.5', 'high', true), false)
   assert.equal(usesFreePrompts('anthropic/claude-sonnet-5.5', 'low', true), false)
 })
+
+test('every address in one IPv6 /64 shares a free-prompt allowance', () => {
+  const same = ['2001:db8:1:2::1', '2001:db8:1:2:ffff:ffff:ffff:ffff', '2001:0db8:0001:0002::', '2001:DB8:1:2:abcd::5']
+  assert.equal(new Set(same.map(trial.allowanceAddress)).size, 1)
+  assert.equal(trial.allowanceAddress('2001:db8:1:2::1'), '2001:0db8:0001:0002::/64')
+  for (const other of ['2001:db8:1:3::1', '2001:db8:2:2::1', '2001:db9:1:2::1', '::1']) {
+    assert.notEqual(trial.allowanceAddress(other), trial.allowanceAddress('2001:db8:1:2::1'), other)
+  }
+  assert.equal(trial.allowanceAddress('203.0.113.7'), '203.0.113.7')
+  assert.equal(trial.allowanceAddress('::ffff:203.0.113.7'), '203.0.113.7')
+  assert.notEqual(trial.allowanceAddress('::ffff:203.0.113.7'), trial.allowanceAddress('::ffff:203.0.113.8'))
+})
+
+test('the free-prompt bucket follows the prefix and not the address', (t) => {
+  const previous = { secret: process.env.SESSION_SECRET, vercel: process.env.VERCEL }
+  Object.assign(process.env, { SESSION_SECRET: 'trial-test-session-password-long-enough', VERCEL: '1' })
+  t.after(() => {
+    for (const [name, value] of Object.entries({ SESSION_SECRET: previous.secret, VERCEL: previous.vercel })) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value
+    }
+  })
+  const bucket = (ip) => trial.trialIpHash(new Headers({ 'x-forwarded-for': ip }))
+  assert.equal(bucket('2001:db8:1:2::1'), bucket('2001:db8:1:2:dead:beef:0:1'))
+  assert.notEqual(bucket('2001:db8:1:2::1'), bucket('2001:db8:1:3::1'))
+  assert.notEqual(bucket('203.0.113.7'), bucket('203.0.113.8'))
+})
