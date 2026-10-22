@@ -780,3 +780,10 @@ test('a page URL opens a chat only when its s names one, by the first paint\'s r
     assert.deepEqual(urlChat(search), { kind: 'invalid' }, search)
   }
 })
+
+test('every page limits images to the app, data: and blob:', async () => {
+  const { default: config } = await import('../next.config.mjs')
+  const rules = (await config.headers()).filter(({ source }) => source === '/:path*')
+  const policies = rules.flatMap(({ headers }) => headers.filter(({ key }) => key === 'Content-Security-Policy').map(({ value }) => value))
+  assert.deepEqual(policies, ["img-src 'self' data: blob:"])
+})

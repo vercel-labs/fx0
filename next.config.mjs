@@ -13,6 +13,9 @@ const nextConfig = {
   },
   // The DESIGN.md catalog is read from disk when a new chat picks one.
   outputFileTracingIncludes: { '/api/prompt': ['./lib/design-md/*.md'] },
+  async headers() {
+    return [{ source: '/:path*', headers: [{ key: 'Content-Security-Policy', value: "img-src 'self' data: blob:" }] }]
+  },
   env: {
     NEXT_PUBLIC_FX0_FREE_PROMPTS: process.env.FX0_FREE_PROMPTS === '1' ? '1' : '0',
   },
