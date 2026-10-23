@@ -14,7 +14,7 @@
     "test:journal:integration": "node --env-file-if-exists=.env.local --experimental-strip-types --test tests/journal.integration.mjs",
     "test:smoke": "node tests/local-auth-smoke.mjs",
     "db:migrate": "node --env-file-if-exists=.env.local scripts/migrate-database.mjs",
-    "test:artifact:browser": "node --experimental-strip-types --test tests/design-artifact.browser.mjs tests/attach-image.browser.mjs",
+    "test:artifact:browser": "node --experimental-strip-types --test tests/design-artifact.browser.mjs tests/attach-image.browser.mjs tests/preview-update.browser.mjs",
     "test:budget:integration": "node --experimental-strip-types --test tests/turn-budget.integration.mjs",
     "test:turns:integration": "node --experimental-strip-types --test tests/turn-work.integration.mjs",
     "test:trial:integration": "node --experimental-strip-types --test tests/trial.integration.mjs",

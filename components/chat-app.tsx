@@ -2090,6 +2090,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
                 source={{ kind: 'design', sessionId: view.sessionId, revision: view.snapshot.transcript.view.artifactRevision }}
                 viewing={viewing}
                 draft={designDraft?.html ?? null}
+                accessAllowed={!authBlocked && signOutStatus == null}
                 intro={view.snapshot.transcript.entries.length === 0}
                 onClose={closePreview}
               />

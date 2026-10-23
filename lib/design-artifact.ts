@@ -1,3 +1,6 @@
+// @ts-expect-error Node strip-types tests require the source extension.
+import { previewUpdateRuntime, type PreviewPayload } from './preview-update.ts'
+
 export const MAX_DESIGN_ARTIFACT_BYTES = 512 * 1024
 export const MAX_REMOTE_IMAGE_URL_LENGTH = 2048
 
@@ -75,7 +78,7 @@ export const MAX_EMBEDDED_IMAGE_BYTES = 4 * 1024 * 1024
 // design becomes its image, loaded from `src` (cached by the browser across revisions),
 // within MAX_EMBEDDED_IMAGE_BYTES counted per occurrence; a missing image is blank. Only
 // then does the design start, so it never needs the network.
-export function designFrameHtml(preparedArtifact: string, readyToken: string, images: { marker: string; src: string }[] = []): string {
+export function designFrameHtml(preparedArtifact: string, readyToken: string, images: { marker: string; src: string }[] = [], preview?: PreviewPayload): string {
   // The design reaches its frame as a blob: URL the wrapper makes from this string,
   // not as a data: URL: browsers refuse data: URLs past 2 MiB, which embedded images
   // reach. A blob: document is local like data:, so it inherits this wrapper's CSP and
@@ -83,6 +86,11 @@ export function designFrameHtml(preparedArtifact: string, readyToken: string, im
   const serializedArtifact = JSON.stringify(preparedArtifact).replace(/</g, '\\u003c')
   const serializedReadyToken = JSON.stringify(readyToken)
   const serializedImages = JSON.stringify(images).replace(/</g, '\\u003c')
+  const scriptJson = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c')
+  const bootstrapToken = 'fx0-bootstrap-token'
+  const childBootstrap = scriptJson(designArtifactBootstrap(bootstrapToken))
+  const childCsp = scriptJson(`<meta http-equiv="Content-Security-Policy" content="${escapeAttribute(DESIGN_ARTIFACT_EMBEDDED_CSP)}">`)
+  const updater = scriptJson(previewUpdateRuntime.toString())
   // The wrapper paints nothing of its own, so a design that has not painted yet
   // shows the app's background. Sharing the app's color scheme keeps it
   // transparent; a design that sets no background still gets the browser's white.
@@ -99,8 +107,14 @@ export function designFrameHtml(preparedArtifact: string, readyToken: string, im
 <script>
 const design=${serializedArtifact};
 const images=${serializedImages};
+const preview=${scriptJson(preview ?? null)};
 let artifact=null;
-const token=${serializedReadyToken};
+let token=${serializedReadyToken};
+let documentId=token;
+let current=null;
+let pending=null;
+let hotReady=false;
+let hasPainted=false;
 const frame=document.createElement('iframe');
 frame.title='Interactive design artifact';
 frame.setAttribute('sandbox','allow-scripts');
@@ -109,45 +123,133 @@ frame.setAttribute('credentialless','');
 let readySignals=0;
 let consumedSignals=0;
 let lastHeartbeat=Date.now();
-const restore=()=>{if(!artifact)return;lastHeartbeat=Date.now();frame.src=artifact;};
+const safe=value=>JSON.stringify(value).replaceAll('<',String.fromCharCode(92)+'u003c');
+const painted=()=>parent.postMessage(preview?{type:'fx0-artifact-painted',protocol:1,sessionId:preview.sessionId,revision:current.revision,documentId,updateReady:hotReady}:{type:'fx0-artifact-painted'},location.origin);
+const reply=(task,status,reason)=>parent.postMessage({type:'fx0-preview-result',protocol:1,sessionId:preview.sessionId,requestId:task.requestId,documentId:task.documentId,revision:task.payload.revision,status,...(reason?{reason}:{})},location.origin);
+const finish=(task,status,reason)=>{if(pending!==task)return;pending=null;task.controller.abort();reply(task,status,reason);};
+const restore=()=>{
+  if(!current)return;
+  if(pending)finish(pending,'reload','document-restarted');
+  hotReady=hasPainted=false;readySignals=consumedSignals=0;lastHeartbeat=Date.now();
+  let html=current.renderHtml;
+  if(preview){
+    documentId=token=crypto.randomUUID();
+    const seed={sessionId:preview.sessionId,revision:current.revision,sourceHtml:current.sourceHtml,renderHtml:html,documentId,parentOrigin:location.origin,token};
+    const bootstrap=${childBootstrap}.replace(${scriptJson(JSON.stringify(bootstrapToken))},JSON.stringify(token));
+    html='<!doctype html>'+${childCsp}+bootstrap+'<script>('+${updater}+')('+safe(seed)+')</scr'+'ipt>'+html.slice('<!doctype html>'.length);
+  }
+  const previous=artifact;
+  artifact=URL.createObjectURL(new Blob([html],{type:'text/html;charset=utf-8'}));
+  frame.src=artifact;
+  if(previous)URL.revokeObjectURL(previous);
+};
+const validPayload=value=>value&&value.protocol===1&&value.sessionId===preview.sessionId&&Number.isSafeInteger(value.revision)&&value.revision>0&&typeof value.sourceHtml==='string'&&new TextEncoder().encode(value.sourceHtml).length<=${MAX_DESIGN_ARTIFACT_BYTES}&&typeof value.renderHtml==='string'&&value.renderHtml.length<=${MAX_DESIGN_ARTIFACT_BYTES * 2}&&Array.isArray(value.images)&&value.images.length<=12&&value.images.every(image=>{
+  if(!image||typeof image.marker!=='string'||!image.marker||image.marker.length>256||typeof image.src!=='string')return false;
+  try{const url=new URL(image.src,location.href);return url.origin===location.origin&&url.pathname==='/api/artifact-image'&&!url.username&&!url.password;}catch{return false;}
+});
 addEventListener('message',event=>{
-  if(event.source!==frame.contentWindow||event.data?.token!==token)return;
+  const data=event.data;
+  if(event.source===parent&&event.origin===location.origin&&preview){
+    if(data?.type==='fx0-preview-status'&&data.protocol===1){if(hasPainted)painted();return;}
+    if(!data||data.protocol!==1||data.documentId!==documentId||typeof data.requestId!=='string'||!data.requestId||data.requestId.length>128)return;
+    if(data.type==='fx0-preview-cancel'){
+      if(pending&&pending.requestId===data.requestId&&pending.phase==='prepare')finish(pending,'error','cancelled');
+      return;
+    }
+    if(data.type!=='fx0-preview-update'||!validPayload(data.payload))return;
+    const task={requestId:data.requestId,documentId,payload:data.payload,controller:new AbortController(),phase:'prepare',remaining:5000};
+    if(pending){reply(task,'error','update-busy');return;}
+    if(!hotReady||data.baseRevision!==current.revision||data.payload.revision<=current.revision){reply(task,'reload','stale-base-revision');return;}
+    pending=task;
+    prepare(task.payload,task.controller).then(renderHtml=>{
+      if(pending!==task||documentId!==task.documentId)return;
+      task.renderHtml=renderHtml;task.phase='apply';
+      frame.contentWindow.postMessage({type:'fx0-preview-apply',protocol:1,token,documentId,requestId:task.requestId,baseRevision:current.revision,revision:task.payload.revision,sourceHtml:task.payload.sourceHtml,renderHtml},'*');
+    }).catch(()=>finish(task,'error','preparation-failed'));
+    return;
+  }
+  if(event.source!==frame.contentWindow||data?.token!==token)return;
   lastHeartbeat=Date.now();
-  if(event.data.type==='ready')readySignals++;
-  // The design paints in its own process, after this wrapper's load event; the app
-  // swaps a new revision on screen only once it has.
-  if(event.data.type==='painted')parent.postMessage({type:'fx0-artifact-painted'},location.origin);
-  // The design can only ask to open a link: its scripts can read the token and send
-  // this at any time. The app shows the address and opens it on the user's own click
-  // there. Recent user activation only filters out asks nobody prompted; it is not proof.
-  if(event.data.type==='open'&&typeof event.data.url==='string'&&navigator.userActivation?.isActive!==false){
-    parent.postMessage({type:'fx0-artifact-open',url:event.data.url},location.origin);
+  if(data.type==='ready')readySignals++;
+  if(data.type==='fx0-preview-ready'&&data.protocol===1&&data.documentId===documentId&&data.revision===current?.revision){hotReady=data.ready===true;return;}
+  if(data.type==='fx0-preview-result'&&data.protocol===1&&data.documentId===documentId){
+    const task=pending;
+    if(!task||task.phase!=='apply'||data.requestId!==task.requestId)return;
+    if(data.status==='applied'&&data.revision===task.payload.revision){
+      current={sourceHtml:task.payload.sourceHtml,renderHtml:task.renderHtml,revision:task.payload.revision};
+      finish(task,'applied');
+    }else if(data.status==='reload'){
+      hotReady=false;
+      finish(task,'reload',typeof data.reason==='string'?data.reason.slice(0,120):'incompatible-update');
+    }
+    return;
+  }
+  // Paint and link messages are observations, never authority to fetch or mutate the host.
+  if(data.type==='painted'){hasPainted=true;painted();}
+  if(data.type==='open'&&typeof data.url==='string'&&navigator.userActivation?.isActive!==false){
+    parent.postMessage({type:'fx0-artifact-open',url:data.url},location.origin);
   }
 });
-frame.addEventListener('load',()=>setTimeout(()=>{
-  if(readySignals>consumedSignals){consumedSignals=readySignals;return;}
-  restore();
-},100));
+frame.addEventListener('load',()=>{
+  const loadedDocument=documentId;
+  setTimeout(()=>{
+    if(loadedDocument!==documentId)return;
+    if(readySignals>consumedSignals){consumedSignals=readySignals;return;}
+    restore();
+  },100);
+});
 // Hidden time and suspended timers are browser pauses, not design failures.
 let lastCheck=Date.now();
 document.addEventListener('visibilitychange',()=>{lastHeartbeat=lastCheck=Date.now();});
 setInterval(()=>{
-  const now=Date.now(),paused=now-lastCheck>3000;
+  const now=Date.now(),elapsed=now-lastCheck,paused=elapsed>3000;
   lastCheck=now;
   if(document.visibilityState!=='visible'||paused){lastHeartbeat=now;return;}
+  if(pending?.phase==='apply'){
+    pending.remaining-=Math.max(0,elapsed);
+    if(pending.remaining<=0){finish(pending,'reload','application-timeout');restore();return;}
+  }
   if(now-lastHeartbeat>3000)restore();
 },500);
-const read=blob=>new Promise(done=>{const reader=new FileReader();reader.onload=()=>done(String(reader.result));reader.onerror=()=>done(null);reader.readAsDataURL(blob)});
-const load=async src=>{try{const response=await fetch(src,{credentials:'same-origin'});if(!response.ok)return null;const blob=await response.blob();return /^image\\/(png|jpeg|gif|webp|avif)$/.test(blob.type)?await read(blob):null}catch{return null}};
-Promise.all(images.map(image=>load(image.src))).then(loaded=>{
-  let html=design,total=0;
-  images.forEach((image,index)=>{
-    const data=loaded[index],size=data?(data.length-data.indexOf(',')-1)*3/4-(data.endsWith('==')?2:data.endsWith('=')?1:0):0;
-    html=html.split(image.marker).map((part,at)=>at===0?part:(data&&total+size<=${MAX_EMBEDDED_IMAGE_BYTES}?(total+=size,data):${JSON.stringify(BLANK_IMAGE)})+part).join('');
-  });
-  artifact=URL.createObjectURL(new Blob([html],{type:'text/html;charset=utf-8'}));
-  lastHeartbeat=Date.now();
-  frame.src=artifact;
+const read=(blob,signal)=>new Promise(done=>{
+  const reader=new FileReader();
+  const abort=()=>{reader.abort();complete(null);};
+  const complete=value=>{signal.removeEventListener('abort',abort);reader.onload=reader.onerror=reader.onabort=null;done(value);};
+  reader.onload=()=>complete(String(reader.result));reader.onerror=reader.onabort=()=>complete(null);
+  if(signal.aborted){complete(null);return;}
+  signal.addEventListener('abort',abort,{once:true});reader.readAsDataURL(blob);
+});
+const load=async(src,signal,deadline)=>{
+  try{
+    const response=await fetch(src,{credentials:'same-origin',signal});
+    if(!response.ok)return null;
+    const blob=await response.blob();
+    if(signal.aborted||Date.now()>=deadline||!/^image\\/(png|jpeg|gif|webp|avif)$/.test(blob.type))return null;
+    const data=await read(blob,signal);
+    return !signal.aborted&&Date.now()<deadline?data:null;
+  }catch{return null;}
+};
+const prepare=async(payload,controller)=>{
+  const deadline=Date.now()+10000;
+  const timer=setTimeout(()=>controller.abort(),10000);
+  try{
+    const loaded=await Promise.all(payload.images.map(image=>load(image.src,controller.signal,deadline)));
+    let html=payload.renderHtml,total=0;
+    payload.images.forEach((image,index)=>{
+      const data=loaded[index],size=data?(data.length-data.indexOf(',')-1)*3/4-(data.endsWith('==')?2:data.endsWith('=')?1:0):0;
+      html=html.split(image.marker).map((part,at)=>at===0?part:(data&&total+size<=${MAX_EMBEDDED_IMAGE_BYTES}?(total+=size,data):${JSON.stringify(BLANK_IMAGE)})+part).join('');
+    });
+    return html;
+  }finally{clearTimeout(timer);}
+};
+const initialController=new AbortController();
+let disposed=false;
+addEventListener('pagehide',()=>{disposed=true;initialController.abort();if(pending)finish(pending,'error','unmounted');if(artifact)URL.revokeObjectURL(artifact);});
+const initial=preview??{renderHtml:design,sourceHtml:design,revision:0,images};
+prepare(initial,initialController).then(renderHtml=>{
+  if(disposed)return;
+  current={sourceHtml:initial.sourceHtml,renderHtml,revision:initial.revision};
+  restore();
   document.querySelector('#frame-root').append(frame);
 });
 </script>

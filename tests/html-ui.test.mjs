@@ -142,6 +142,18 @@ test('a chat with a published design renders its transcript and the isolated pre
   assert.match(markup, /aria-label="copy, download or publish the design"/)
 })
 
+test('a denied preview renders neither its published frame nor an in-progress private draft', () => {
+  const markup = renderToStaticMarkup(createElement(PreviewPane, {
+    source: { kind: 'design', sessionId: 'private-session', revision: 2 },
+    viewing: null,
+    draft: '<!doctype html><html><head></head><body><p>Private draft</p></body></html>',
+    accessAllowed: false,
+    intro: false,
+    onClose: () => {},
+  }))
+  assert.doesNotMatch(markup, /<iframe|artifact-frame|Design preview while generating|Private draft/)
+})
+
 test('a reloaded transcript is anchored at its end until the client takes over', () => {
   const markup = renderChat({ revision: 0, events: [{ type: 'user', seq: 1, id: 1, text: 'Keep this history', author: 'Ada' }] })
   // A reversed flex column scrolls from its end, so every paint of a partly parsed

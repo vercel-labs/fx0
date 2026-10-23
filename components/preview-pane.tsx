@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { designLinkUrl } from '../lib/design-link'
 import { EMPTY_DRAFT_DOCUMENT, patchDraftDocument } from '../lib/draft-preview'
+import { PREVIEW_PREPARE_MS, PREVIEW_PROTOCOL, type PreviewPayload } from '../lib/preview-update'
+import { AuthRouteError, fetchUi } from './auth-ui'
 import DesignLinkDialog from './design-link-dialog'
 import { HowItWorksPanel } from './how-it-works'
 
@@ -12,112 +14,375 @@ const LINK_PAUSE_MS = 2000
 
 export type PreviewSource = { kind: 'design'; sessionId: string; revision: number }
 
+type PreviewSlot = {
+  mountUrl: string
+  requestedRevision: number
+  appliedRevision: number | null
+  documentId: string | null
+  updateReady: boolean
+}
+
+type PreviewDisplay = {
+  scope: string
+  slots: [PreviewSlot | null, PreviewSlot | null]
+  front: number | null
+  error: string | null
+}
+
+type PreviewAttempt = {
+  revision: number
+  controller: AbortController
+  timer: ReturnType<typeof setTimeout> | null
+  requestId: string
+  posted: { index: number; documentId: string; revision: number } | null
+}
+
+function isPreviewPayload(value: unknown): value is PreviewPayload {
+  if (!value || typeof value !== 'object') return false
+  const payload = value as Partial<PreviewPayload>
+  return payload.protocol === PREVIEW_PROTOCOL && typeof payload.sessionId === 'string'
+    && Number.isSafeInteger(payload.revision) && payload.revision! > 0
+    && typeof payload.sourceHtml === 'string' && new TextEncoder().encode(payload.sourceHtml).length <= 512 * 1024
+    && typeof payload.renderHtml === 'string' && payload.renderHtml.length <= 1024 * 1024
+    && Array.isArray(payload.images) && payload.images.length <= 12 && payload.images.every((image) => {
+      if (image == null || typeof image.marker !== 'string' || !image.marker || image.marker.length > 256 || typeof image.src !== 'string') return false
+      try {
+        const url = new URL(image.src, window.location.href)
+        return url.origin === window.location.origin && url.pathname === '/api/artifact-image' && !url.username && !url.password
+      } catch { return false }
+    })
+}
+
 export default function PreviewPane({
   source,
   viewing,
   draft = null,
+  accessAllowed = true,
   intro,
   onClose,
 }: {
   source: PreviewSource
   // A past revision opened from the transcript's "View" link, never the latest; null is the latest.
   viewing: number | null
-  // The design as the model writes it; shown until the real publish arrives.
+  // The design as the model writes it; shown until the first real publish paints.
   draft?: string | null
+  // Explicit revocation hides every private layer, including retained drafts and links.
+  accessAllowed?: boolean
   // Only an empty chat explains fx0; a chat waiting on its first design stays blank.
   intro: boolean
   onClose: () => void
 }) {
-  const session = encodeURIComponent(source.sessionId)
-  const previewUrl = source.revision > 0
-    ? viewing != null
-      ? `/api/artifact-frame?session=${session}&revision=${viewing}`
-      : `/api/artifact-frame?session=${session}&v=${source.revision}`
-    : null
-
-  // A new revision, or another chat's design, loads in a slot underneath and comes to
-  // the front once it has loaded, so the screen never shows a frame mid-load. The
-  // slots never move in the DOM (moving an iframe reloads it); only which one is in
-  // front changes. The draft stays on top until the front slot shows the latest
-  // revision.
-  const [slots, setSlots] = useState<[string | null, string | null]>([previewUrl, null])
-  const [front, setFront] = useState<number | null>(previewUrl ? 0 : null)
-  const wanted = useRef(previewUrl)
-  wanted.current = previewUrl
-  const slotUrls = useRef(slots)
-  slotUrls.current = slots
-  const fallback = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // Only a slot holding the revision asked for now may come to the front; a late
-  // paint or fallback from a revision already left behind is ignored.
-  const bringToFront = (index: number) => {
-    if (slotUrls.current[index] !== wanted.current) return
-    if (fallback.current) clearTimeout(fallback.current)
-    setFront(index)
-  }
-  useEffect(() => {
-    if (!previewUrl) {
-      setSlots([null, null])
-      setFront(null)
-      return
-    }
-    // Returning to a design still loaded in a slot (the chat just left, or the latest
-    // after viewing an older revision) shows it at once; it has already painted.
-    const loaded = slots.indexOf(previewUrl)
-    if (loaded >= 0) {
-      bringToFront(loaded)
-      return
-    }
-    const target = front == null ? 0 : 1 - front
-    setSlots((current) => (target === 0 ? [previewUrl, current[1]] : [current[0], previewUrl]))
-  }, [previewUrl]) // eslint-disable-line react-hooks/exhaustive-deps
-  // A slot comes to the front once its design reports it has painted. The design
-  // renders in a nested frame in another process, so the slot's own load event
-  // fires before that and swapping then showed the wrapper's white page. Documents
-  // that never report (a missing revision) swap a while after loading.
+  const scope = JSON.stringify([source.sessionId, viewing, accessAllowed])
+  const currentScope = useRef(scope)
+  currentScope.current = scope
   const frames = useRef<(HTMLIFrameElement | null)[]>([null, null])
-  const frontIndex = useRef(front)
-  frontIndex.current = front
-  // A link the design on screen asked to open, waiting for the user's own click.
-  const [linkRequest, setLinkRequest] = useState<string | null>(null)
+  const demand = useRef<(revision: number, retry?: boolean) => void>(() => {})
+  const retry = useRef(() => {})
+  const [display, setDisplay] = useState<PreviewDisplay>(() => {
+    const revision = accessAllowed && source.revision > 0 ? (viewing ?? source.revision) : 0
+    const slot: PreviewSlot | null = revision > 0 ? {
+      mountUrl: `/api/artifact-frame?session=${encodeURIComponent(source.sessionId)}&${viewing == null ? 'v' : 'revision'}=${revision}`,
+      requestedRevision: revision, appliedRevision: null, documentId: null, updateReady: false,
+    } : null
+    return { scope, slots: [slot, null], front: slot ? 0 : null, error: null }
+  })
+  // Hydration adopts this exact HTML load. Keep it through Strict Mode's effect
+  // replay, but never reuse it after navigation to a different document scope.
+  const initialDisplay = useRef<PreviewDisplay | null>(display)
+  const [linkRequest, setLinkRequest] = useState<{ scope: string; url: string } | null>(null)
   const linksPausedUntil = useRef(0)
   const closeLinkRequest = useCallback(() => {
     linksPausedUntil.current = Date.now() + LINK_PAUSE_MS
     setLinkRequest(null)
   }, [])
+
   useEffect(() => {
-    setLinkRequest(null)
-  }, [source.sessionId])
-  useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return
-      if (event.data?.type === 'fx0-artifact-open') {
-        // Only the design on screen may ask, never one loading underneath; one ask
-        // at a time, and none just after the last one closed.
-        const shown = frontIndex.current == null ? null : frames.current[frontIndex.current]
-        const url = designLinkUrl(event.data.url)
-        if (!url || !shown || shown.contentWindow !== event.source || Date.now() < linksPausedUntil.current) return
-        setLinkRequest((current) => current ?? url)
+    if (!accessAllowed) {
+      initialDisplay.current = null
+      setDisplay({ scope, slots: [null, null], front: null, error: null })
+      setLinkRequest(null)
+      demand.current = () => {}
+      retry.current = () => {}
+      return
+    }
+    const sessionId = source.sessionId
+    const session = encodeURIComponent(sessionId)
+    const initial = initialDisplay.current?.scope === scope ? initialDisplay.current : null
+    if (!initial) initialDisplay.current = null
+    const slots: [PreviewSlot | null, PreviewSlot | null] = [initial?.slots[0] ? { ...initial.slots[0] } : null, null]
+    let front = initial?.front ?? null
+    let desired = slots[0]?.requestedRevision ?? 0
+    let error: string | null = null
+    let disposed = false
+    let attempt: PreviewAttempt | null = null
+    let loading: number | null = slots[0] ? 0 : null
+    let loadTimer: ReturnType<typeof setTimeout> | null = null
+    const active = () => !disposed && currentScope.current === scope
+    const urlFor = (revision: number) => `/api/artifact-frame?session=${session}&${viewing == null ? 'v' : 'revision'}=${revision}`
+    const publish = () => {
+      if (active()) setDisplay({ scope, slots: [slots[0] && { ...slots[0] }, slots[1] && { ...slots[1] }], front, error })
+    }
+    const cancelPosted = () => {
+      if (!attempt?.posted) return
+      const { index, documentId } = attempt.posted
+      frames.current[index]?.contentWindow?.postMessage({
+        type: 'fx0-preview-cancel', protocol: PREVIEW_PROTOCOL, requestId: attempt.requestId, documentId,
+      }, window.location.origin)
+    }
+    const clearAttempt = () => {
+      if (attempt?.timer) clearTimeout(attempt.timer)
+      attempt?.controller.abort()
+      attempt = null
+    }
+    const clearLoading = () => {
+      if (loadTimer) clearTimeout(loadTimer)
+      loadTimer = null
+      if (loading != null) {
+        slots[loading] = null
+        if (front === loading) front = null
+      }
+      loading = null
+    }
+    const fail = (message: string) => {
+      error = message
+      publish()
+    }
+    const watchLoad = (index: number) => {
+      loadTimer = setTimeout(() => {
+        if (!active() || loading !== index) return
+        clearLoading()
+        fail('The design preview did not finish loading. Try again.')
+      }, PREVIEW_PREPARE_MS * 2)
+    }
+    if (loading != null) watchLoad(loading)
+    const loadFull = (revision: number) => {
+      const index = front == null ? 0 : 1 - front
+      // Never reuse a URL as evidence of document identity, including after a hot
+      // patch. A distinct mount URL also rejects queued messages from the old page
+      // in this slot's (stable) WindowProxy.
+      slots[index] = {
+        mountUrl: `${urlFor(revision)}&mount=${crypto.randomUUID()}`,
+        requestedRevision: revision, appliedRevision: null, documentId: null, updateReady: false,
+      }
+      loading = index
+      watchLoad(index)
+      publish()
+    }
+
+    const pump = async () => {
+      if (!active() || !desired || error || attempt || loading != null) return
+      const shown = front == null ? null : slots[front]
+      // A legacy wrapper can confirm a full load, but cannot advertise hot updates.
+      if (shown && (shown.appliedRevision ?? shown.requestedRevision) >= desired) return
+      const next: PreviewAttempt = {
+        revision: desired, controller: new AbortController(), timer: null,
+        requestId: crypto.randomUUID(), posted: null,
+      }
+      attempt = next
+      const deadline = Date.now() + PREVIEW_PREPARE_MS
+      next.timer = setTimeout(() => next.controller.abort(), PREVIEW_PREPARE_MS)
+      const isCurrent = () => active() && attempt === next
+      try {
+        // Updates read the entire body under the same deadline, not just headers.
+        // The initial server-rendered artifact loads HTML directly instead.
+        const response = await fetchUi(`${urlFor(next.revision)}&format=json`, {
+          signal: next.controller.signal, cache: 'no-store',
+        })
+        if (!isCurrent()) return
+        if (response.status === 404) throw new Error('This design is not available. Try again.')
+        const unsupported = [400, 406, 415, 501].includes(response.status)
+        if (!response.ok && !unsupported) throw new Error('The design could not be loaded. Try again.')
+        const body = await response.text()
+        if (!isCurrent()) return
+        if (Date.now() >= deadline || next.controller.signal.aborted) throw new Error('Preview request timed out. Try again.')
+        let payload: unknown = null
+        if (!unsupported && response.headers.get('content-type')?.includes('application/json')) {
+          try { payload = JSON.parse(body) } catch { /* An older or unknown representation uses HTML once. */ }
+        }
+        if (Date.now() >= deadline) throw new Error('Preview request timed out. Try again.')
+        if (next.timer) clearTimeout(next.timer)
+        next.timer = null
+        if (!isPreviewPayload(payload)) {
+          clearAttempt()
+          loadFull(desired)
+          return
+        }
+        if (payload.sessionId !== sessionId || (viewing == null ? payload.revision < desired : payload.revision !== viewing)) {
+          throw new Error('The requested design version is not available yet. Try again.')
+        }
+        // A response may already be ahead of its journal event. Never send an
+        // older revision back into the confirmed document.
+        if (shown?.appliedRevision != null && payload.revision <= shown.appliedRevision) {
+          clearAttempt()
+          return
+        }
+        if (viewing != null || !shown?.updateReady || !shown.documentId || front == null) {
+          clearAttempt()
+          loadFull(payload.revision)
+          return
+        }
+        const targetWindow = frames.current[front]?.contentWindow
+        if (!targetWindow) throw new Error('The design preview is unavailable. Try again.')
+        next.posted = { index: front, documentId: shown.documentId, revision: payload.revision }
+        targetWindow.postMessage({
+          type: 'fx0-preview-update', protocol: PREVIEW_PROTOCOL, requestId: next.requestId,
+          documentId: shown.documentId, baseRevision: shown.appliedRevision, payload,
+        }, window.location.origin)
+        // The wrapper owns image preparation and its visible-time ACK deadline.
+        // Keep this attempt occupied until its result, even if desired moves on.
+      } catch (cause) {
+        if (!isCurrent()) return
+        const timedOut = Date.now() >= deadline || next.controller.signal.aborted
+        clearAttempt()
+        fail(cause instanceof AuthRouteError ? cause.message
+          : timedOut ? 'Preview request timed out. Try again.'
+            : cause instanceof Error && cause.message ? cause.message : 'The design could not be loaded. Try again.')
+      }
+    }
+
+    demand.current = (revision, again = false) => {
+      const target = revision > 0 ? (viewing ?? revision) : 0
+      // Zero also represents revoked access. It must clear the private document,
+      // rather than be treated as an older journal event to ignore.
+      if (!target) {
+        cancelPosted()
+        clearAttempt()
+        clearLoading()
+        slots[0] = slots[1] = null
+        front = null
+        desired = 0
+        error = null
+        initialDisplay.current = null
+        publish()
         return
       }
-      if (event.data?.type !== 'fx0-artifact-painted') return
+      const newest = viewing == null ? Math.max(desired, target) : target
+      if (newest === desired && !again) return
+      desired = newest
+      error = null
+      if (attempt?.posted) {
+        // Cancel delegated preparation, but do not assume cancellation undid a
+        // mutation. Its result (or a new document) must release the apply lane.
+        cancelPosted()
+      } else {
+        clearAttempt()
+      }
+      clearLoading()
+      publish()
+      void pump()
+    }
+    retry.current = () => demand.current(desired, true)
+    setLinkRequest(null)
+    publish()
+
+    const onMessage = (event: MessageEvent) => {
+      if (!active() || event.origin !== window.location.origin) return
       const index = frames.current.findIndex((frame) => frame?.contentWindow === event.source)
-      if (index >= 0) bringToFront(index)
+      const slot = slots[index]
+      if (!slot || (index !== front && index !== loading)) return
+      // Source equality alone survives iframe navigation. Check the actual wrapper
+      // URL as well before accepting the first document ID for this mount.
+      try {
+        if (frames.current[index]?.contentDocument?.URL !== new URL(slot.mountUrl, window.location.origin).href) return
+      } catch { return }
+      const data = event.data
+      if (!data || typeof data !== 'object') return
+      if (data.type === 'fx0-artifact-open') {
+        const url = designLinkUrl(data.url)
+        if (index !== front || !url || Date.now() < linksPausedUntil.current) return
+        setLinkRequest((current) => current ?? { scope, url })
+        return
+      }
+      if (data.type === 'fx0-preview-result') {
+        const posted = attempt?.posted
+        if (!posted || index !== front || posted.index !== index || data.protocol !== PREVIEW_PROTOCOL
+          || data.requestId !== attempt?.requestId || data.documentId !== posted.documentId
+          || data.documentId !== slot.documentId || data.sessionId !== sessionId || data.revision !== posted.revision
+          || !['applied', 'reload', 'error'].includes(data.status)) return
+        const superseded = attempt!.revision < desired
+        clearAttempt()
+        if (data.status === 'applied') {
+          slot.appliedRevision = Math.max(slot.appliedRevision ?? 0, data.revision)
+          error = null
+          publish()
+          void pump()
+        } else if (data.status === 'reload') {
+          // Read latest again: a newer publish can have arrived during preparation.
+          loadFull(Math.max(desired, data.revision))
+        } else if (superseded) {
+          void pump()
+        } else {
+          fail('The design update could not be applied. Your previous preview is still shown. Try again.')
+        }
+        return
+      }
+      if (data.type !== 'fx0-artifact-painted') return
+      const legacy = data.protocol === undefined && data.sessionId === undefined && data.revision === undefined
+        && data.documentId === undefined && data.updateReady === undefined
+      if (!legacy && (data.protocol !== PREVIEW_PROTOCOL || data.sessionId !== sessionId
+        || !Number.isSafeInteger(data.revision) || data.revision < slot.requestedRevision
+        || typeof data.documentId !== 'string' || !data.documentId || typeof data.updateReady !== 'boolean')) return
+      const revision = legacy ? slot.requestedRevision : data.revision as number
+      const confirmed = front == null ? null : slots[front]?.appliedRevision
+      if ((viewing != null && revision !== viewing) || (index !== front && revision < desired)
+        || (viewing == null && confirmed != null && revision < confirmed)) return
+      if (index === front && loading !== index && slot.documentId === (legacy ? null : data.documentId)
+        && (slot.appliedRevision ?? slot.requestedRevision) === revision
+        && slot.updateReady === (!legacy && data.updateReady)) return
+      // Recovery keeps the wrapper WindowProxy but installs a new child document.
+      // Invalidate work tied to the previous document before accepting that paint.
+      if (slot.documentId !== (legacy ? null : data.documentId)) {
+        cancelPosted()
+        clearAttempt()
+        setLinkRequest(null)
+      }
+      slot.appliedRevision = legacy ? null : revision
+      slot.documentId = legacy ? null : data.documentId
+      slot.updateReady = !legacy && data.updateReady
+      if (loading === index) {
+        if (loadTimer) clearTimeout(loadTimer)
+        loadTimer = null
+        loading = null
+        // Old documents are deliberately not cached after cross-document navigation.
+        slots[1 - index] = null
+        front = index
+        setLinkRequest(null)
+      }
+      error = null
+      publish()
+      void pump()
     }
     window.addEventListener('message', onMessage)
+    // The SSR iframe can paint before hydration installs this listener.
+    for (const frame of frames.current) frame?.contentWindow?.postMessage({ type: 'fx0-preview-status', protocol: PREVIEW_PROTOCOL }, window.location.origin)
     return () => {
+      disposed = true
+      cancelPosted()
+      clearAttempt()
+      clearLoading()
       window.removeEventListener('message', onMessage)
-      if (fallback.current) clearTimeout(fallback.current)
+      demand.current = () => {}
+      retry.current = () => {}
     }
-  }, [])
-  const caughtUp = !previewUrl || (front != null && slots[front] === previewUrl)
-  const [heldDraft, setHeldDraft] = useState<string | null>(null)
-  const liveDraft = draft && renderable(draft) ? draft : null
+  }, [source.sessionId, viewing, scope, accessAllowed])
+
   useEffect(() => {
-    if (liveDraft) setHeldDraft(liveDraft)
-    else if (!draft && caughtUp) setHeldDraft(null)
-  }, [liveDraft, draft, caughtUp])
-  const draftLayer = liveDraft ?? heldDraft
-  const shownUrl = front != null ? slots[front] : null
+    demand.current(source.revision)
+  }, [source.sessionId, source.revision, viewing])
+
+  const current = display.scope === scope
+  const slots: PreviewDisplay['slots'] = current ? display.slots : [null, null]
+  const front = current ? display.front : null
+  const published = front != null
+  const [heldDraft, setHeldDraft] = useState<{ scope: string; html: string } | null>(null)
+  const liveDraft = accessAllowed && draft && renderable(draft) ? draft : null
+  useEffect(() => {
+    if (!accessAllowed || published) setHeldDraft(null)
+    else if (liveDraft) setHeldDraft({ scope, html: liveDraft })
+    else if (!draft && source.revision === 0) setHeldDraft(null)
+  }, [liveDraft, draft, published, scope, source.revision, accessAllowed])
+  // Once published, never cover the live program with a scriptless draft photo.
+  const draftLayer = published ? null : liveDraft ?? (heldDraft?.scope === scope ? heldDraft.html : null)
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -135,43 +400,45 @@ export default function PreviewPane({
       aria-label="preview"
       className="order-1 flex min-h-0 min-w-0 flex-1 flex-col bg-background overscroll-contain lg:order-none lg:border-l lg:border-border"
     >
-      {draftLayer || shownUrl || slots[0] || slots[1] ? (
-        <div className="relative min-h-0 flex-1">
-          {slots.map((url, index) => url && (
-            <iframe
-              key={index}
-              ref={(element) => { frames.current[index] = element }}
-              src={url}
-              referrerPolicy="no-referrer"
-              title={index === front ? 'Design artifact preview' : undefined}
-              aria-hidden={index !== front || undefined}
-              onLoad={() => {
-                if (index === front) return
-                if (fallback.current) clearTimeout(fallback.current)
-                fallback.current = setTimeout(() => bringToFront(index), 1500)
-              }}
-              className={`absolute inset-0 h-full w-full bg-background ${frameLayer(index === front, front != null)}`}
-            />
-          ))}
-          {draftLayer && (
-            <div className="absolute inset-0 z-20 flex">
-              <DraftPreview html={draftLayer} />
-            </div>
-          )}
+      {current && display.error && (
+        <div role="status" aria-live="polite" className="flex items-center justify-between gap-3 border-b border-border px-4 py-3 text-sm">
+          <p>{display.error}</p>
+          <button type="button" onClick={() => retry.current()} className="shrink-0 rounded px-3 py-2 underline focus-visible:outline-2 focus-visible:outline-offset-2">
+            Retry preview
+          </button>
         </div>
-      ) : intro ? (
-        // A chat loading from its URL (html.chat-url) is not empty, so it stays blank too.
-        <div className="min-h-0 flex-1 overflow-y-auto [html.chat-url_&]:hidden">
-          <div className="flex min-h-full items-center justify-center px-6 py-10">
-            <div className="w-full max-w-sm">
-              <HowItWorksPanel />
+      )}
+      <div className="relative min-h-0 flex-1">
+        {/* These two slots never move or change keys. A hot update never changes src. */}
+        {slots.map((slot, index) => slot && (
+          <iframe
+            key={index}
+            ref={(element) => { frames.current[index] = element }}
+            src={slot.mountUrl}
+            referrerPolicy="no-referrer"
+            onLoad={() => frames.current[index]?.contentWindow?.postMessage({ type: 'fx0-preview-status', protocol: PREVIEW_PROTOCOL }, window.location.origin)}
+            title={index === front ? 'Design artifact preview' : 'Loading design artifact preview'}
+            aria-hidden={index !== front || undefined}
+            tabIndex={index === front ? undefined : -1}
+            className={`absolute inset-0 h-full w-full bg-background ${frameLayer(index === front, front != null)}`}
+          />
+        ))}
+        {draftLayer ? (
+          <div className="absolute inset-0 z-20 flex">
+            <DraftPreview html={draftLayer} />
+          </div>
+        ) : !published && !slots[0] && !slots[1] && intro ? (
+          // A chat loading from its URL (html.chat-url) is not empty, so it stays blank too.
+          <div className="h-full min-h-0 overflow-y-auto [html.chat-url_&]:hidden">
+            <div className="flex min-h-full items-center justify-center px-6 py-10">
+              <div className="w-full max-w-sm">
+                <HowItWorksPanel />
+              </div>
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="flex-1" />
-      )}
-      <DesignLinkDialog url={linkRequest} onClose={closeLinkRequest} />
+        ) : null}
+      </div>
+      <DesignLinkDialog url={linkRequest?.scope === scope ? linkRequest.url : null} onClose={closeLinkRequest} />
     </section>
   )
 }

@@ -491,8 +491,8 @@ test('the artifact preview permits iframe origins but preserves opaque credentia
   // The design only asks to open a link; the wrapper passes the ask to the app on this
   // origin, which shows the address and opens it on the user's own click.
   assert.doesNotMatch(html, /window\.open/)
-  assert.match(html, /if\(event\.source!==frame\.contentWindow\|\|event\.data\?\.token!==token\)return;/)
-  assert.match(html, /parent\.postMessage\(\{type:'fx0-artifact-open',url:event\.data\.url\},location\.origin\)/)
+  assert.match(html, /if\(event\.source!==frame\.contentWindow\|\|data\?\.token!==token\)return;/)
+  assert.match(html, /parent\.postMessage\(\{type:'fx0-artifact-open',url:data\.url\},location\.origin\)/)
   assert.match(html, /navigator\.userActivation\?\.isActive!==false/)
   assert.doesNotMatch(html, /allow-popups/)
   assert.match(html, /setAttribute\('credentialless',''\)/)
@@ -627,6 +627,46 @@ test('the browser keeps a preview only when its URL names the revision that is l
   const missing = await frame('&v=1')
   assert.equal(missing.status, 404)
   assert.equal(missing.headers.get('cache-control'), 'private, no-store')
+})
+
+test('preview update data names the actual revision, never shares HTML validators, and contains no host bootstrap', async () => {
+  const state = reset({ liveRevision: 4 })
+  const req = request('artifact-frame', 'GET', `${own}&v=2&format=json`)
+  req.headers.set('if-none-match', `"${own}:4"`)
+  const response = await routes['artifact-frame'].GET(req)
+  assert.equal(response.status, 200)
+  assert.match(response.headers.get('content-type'), /^application\/json/)
+  assert.equal(response.headers.get('cache-control'), 'private, no-store')
+  assert.equal(response.headers.get('etag'), null)
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+  const data = await response.json()
+  assert.equal(data.protocol, 1)
+  assert.equal(data.sessionId, own)
+  assert.equal(data.revision, 4)
+  assert.equal(data.sourceHtml, data.renderHtml)
+  assert.deepEqual(data.images, [])
+  assert.doesNotMatch(JSON.stringify(data), /fx0-preview-ready|Content-Security-Policy|user-token|secret-refresh/)
+  assert.equal(state.redisReads.filter(id => id === own).length, 1, 'source and revision come from one read')
+})
+
+test('preview JSON uses the same ownership boundary and refuses missing artifacts or unknown formats', async () => {
+  const state = reset()
+  assert.equal((await routes['artifact-frame'].GET(request('artifact-frame', 'GET', `${foreign}&format=json`))).status, 404)
+  assert.equal(state.redisReads.includes(foreign), false)
+  state.liveRevision = 0
+  const missing = await routes['artifact-frame'].GET(request('artifact-frame', 'GET', `${own}&format=json`))
+  assert.equal(missing.status, 404)
+  assert.equal(missing.headers.get('cache-control'), 'private, no-store')
+  assert.equal((await routes['artifact-frame'].GET(request('artifact-frame', 'GET', `${own}&format=unknown`))).status, 400)
+})
+
+test('image-free wrappers can prepare later images without granting the design network access', async () => {
+  reset()
+  const response = await routes['artifact-frame'].GET(request('artifact-frame'))
+  assert.match(response.headers.get('content-security-policy'), /connect-src https:\/\/fx0\.example\/api\/artifact-image(?:;|$)/)
+  const html = await response.text()
+  assert.match(html, /connect-src 'none'/)
+  assert.doesNotMatch(html, /allow-same-origin|allow-popups/)
 })
 
 test('the design download is the stored HTML, served so this origin never renders it', async () => {
