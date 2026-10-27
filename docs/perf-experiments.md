@@ -307,6 +307,29 @@ Vercel keeps started-but-uninitialized Node processes, and routes prompts to the
 
 C made content and preview later in this test. `/api/session` was slower on the candidate, with two cold cases (1.4 s and 2.5 s): in the prompt's function it landed on instances no prompt had used on that fresh deploy, while the baseline's own function was already warm. Drop C from the change. A better candidate to test separately: the 30 s group (`teams`, `credits`), which every page load calls and therefore keeps warm when a person opens the history. This needs a check that the route's `DELETE` fits in 30 s.
 
+## Experiment 7: start the preview with the chat (B); C dropped
+
+**Change** (branch `esteban/fx0-perf-instant-switch`, commit `407623b`, on top of A):
+
+- History summaries carry `artifactRevision` when it is above 0, read in the same `HMGET` (no extra Redis request); the transcript summary carries it too, so the list keeps it after a visit.
+- While an uncached chat opens, the preview's source is that chat at the listed revision. The snapshot then names the same source, so the frame keeps loading instead of starting over. If the chat published since the list loaded, the preview moves to the newer revision when the snapshot arrives.
+- `/api/session` returns to `maxDuration = 300`. Moving it into the prompt's function made it colder (Experiment 6), and the 30 s group is unsafe: its `DELETE` renews a cleanup lease every 30 s and deletes design assets, so it is built to run longer than 30 s.
+- Tests: summaries include the revision only when it is above 0 (fails on the base code). The UI test asserts the early preview source, and fails when it is never set (checked by mutation).
+
+**Result** (12 samples per side, interleaved, lab `~/.fx0-perf-labs/switch-ab2`):
+
+| From the click | Baseline | A + B |
+| --- | ---: | ---: |
+| URL changes (median) | 95 ms | **0.4 ms** |
+| Chat shown (median) | 138 ms | **13 ms** |
+| Chat content (median) | 138 ms | 156 ms |
+| Preview (median) | 618 ms | **558 ms** |
+| Preview (worst) | 1501 ms | **690 ms** |
+
+The preview no longer waits for `/api/session`. In one candidate sample `/api/session` took 723 ms (cold), and the preview showed at 453 ms, before the transcript. Whenever the baseline's `/api/session` was slow (890 and 957 ms), its preview took 1.5 s. Content time is unchanged within noise; neither change touches it.
+
+**D (capture runtime out of every frame) is not part of this change.** It would cut ~95 KB raw (~29 KB brotli) from each preview, but loading it as a shared script means widening the design document's CSP to allow a same-origin script. That needs its own security design, not a performance tweak.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |
