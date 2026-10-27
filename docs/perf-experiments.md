@@ -392,6 +392,32 @@ The preview no longer waits for `/api/session`. In one candidate sample `/api/se
 
 **Read.** Moving libfx to a queue-started turn would cost fx0 about a third of a second on cold prompts, and little or nothing measurable on warm ones, as long as `/api/libfx` stays in the prompt's function group. Re-measure with the real queue API before upgrading libfx.
 
+## Experiment 10: shorter libfx admission (backstop alongside the log write)
+
+**Change** (branch `esteban/fx0-perf-admission`, `89ae1fb`, never merge): an install-time patch of libfx 0.0.14 `durable.js` (exact version, one match per block):
+
+1. When the request runs its own turn, `send()` computes the deadline (local: `getDeadline()` from the request context, no network), queues the delayed backstop before the log is opened, and awaits it after the write. Acceptance still waits for the logged input and the queued backstop.
+2. The viewer's start (`streams.getInfo`) runs alongside `send()` and lands before the first write (Experiment 2).
+
+**Why it is safe.** The backstop is delivered only after the request's deadline plus 5 s (800 s on `/api/prompt`), so it cannot run before the write lands. If the write fails, acceptance rejects and the backstop's eventual delivery finds no input: `SessionWorker.consume` refuses it as "unknown message". Retries of the same `messageId` reuse the same idempotency key. Open question for the SDK proposal: a backstop now goes out even when `recordMessage` throws `messageIdInUse`; its delivery finds the other message's id consumed.
+
+**Proof on the real SDK** (`tests/libfx-admission-experiment.test.mjs`, local World instrumented at the calls Vercel serves over the network, `queueLeases`/`runInRequest` on): the viewer start lands before any write; the backstop leaves before the log read and write finish; acceptance waits for both; a failed write rejects acceptance and runs nothing, and a retry runs the turn once. Both tests fail on unpatched libfx. fx0 core 170, auth 261, trace 60, typecheck and build pass; the Vercel build log shows the patch applied.
+
+**Result** (labs `~/.fx0-perf-labs/admission-warm` and `admission-cold`; 0 failures). In every candidate trace the Queues send overlaps the World calls (0 of 9 in the baseline):
+
+| | Baseline p50 | Candidate p50 | Paired median | Faster |
+| --- | ---: | ---: | ---: | ---: |
+| Warm, 6 pairs: libfx admission | 575 ms | 479 ms | **−115 ms** | 5/6 |
+| Warm: Sending | 982 ms | 724 ms | −258 ms | 5/6 |
+| Warm: first text | 2,502 ms | 1,967 ms | −534 ms | 5/6 |
+| Cold, 3 pairs: libfx admission | 1,028 ms | 542 ms | **−486 ms** | 3/3 |
+| Cold: Sending | 2,404 ms | 1,930 ms | −475 ms | 3/3 |
+| Cold: first text | 3,550 ms | 2,985 ms | −212 ms | 2/3 |
+
+Admission is the stage the patch changes and the least noisy measure. The warm Sending and first-text deltas are larger than the admission saving: one baseline sample landed on a new process (pair 3), and first text carries AI Gateway variance.
+
+**Read.** About 100–130 ms off every warm prompt and about half a second off a new instance's first prompt, with the same durability guarantees. Next: propose it in vercel-labs/fx (`sdk/durable.js`) with the TLA+ admission model updated, coordinated with the planned queue API change.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |
