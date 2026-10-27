@@ -399,7 +399,9 @@ The preview no longer waits for `/api/session`. In one candidate sample `/api/se
 1. When the request runs its own turn, `send()` computes the deadline (local: `getDeadline()` from the request context, no network), queues the delayed backstop before the log is opened, and awaits it after the write. Acceptance still waits for the logged input and the queued backstop.
 2. The viewer's start (`streams.getInfo`) runs alongside `send()` and lands before the first write (Experiment 2).
 
-**Why it is safe.** The backstop is delivered only after the request's deadline plus 5 s (800 s on `/api/prompt`), so it cannot run before the write lands. If the write fails, acceptance rejects and the backstop's eventual delivery finds no input: `SessionWorker.consume` refuses it as "unknown message". Retries of the same `messageId` reuse the same idempotency key. Open question for the SDK proposal: a backstop now goes out even when `recordMessage` throws `messageIdInUse`; its delivery finds the other message's id consumed.
+**Correction after recovery review: do not ship enqueue-before-log.** The earlier claim that the delay preserves the same durability guarantees was incorrect. A failed input write can leave a queued backstop. A retry can deduplicate against that same message, whose original deadline may expire while the retry is still persisting its input. That delivery sees no stored input and is acknowledged; the retry can then persist and be accepted with no pending backstop. This counterexample does not require dedupe keys to survive acknowledgement. Retaining keys after acknowledgement permits another failure sequence as well. The current log-before-queue ordering avoids both cases.
+
+The counterexample was reproduced against the current SDK core and its delivering, deduplicating queue fixture, with a gated retry write. The original SDK retains one pending backstop (exit 0); the queue-before-log mutation leaves none (assertion failure, exit 1). A bounded TLA+ admission model also rejects queue-before-log with both key-retention policies (`Recoverable`, TLC exit 12) and accepts log-before-queue (exit 0). These checks isolate an ordering risk; they do not establish the production Queues retention contract.
 
 **Proof on the real SDK** (`tests/libfx-admission-experiment.test.mjs`, local World instrumented at the calls Vercel serves over the network, `queueLeases`/`runInRequest` on): the viewer start lands before any write; the backstop leaves before the log read and write finish; acceptance waits for both; a failed write rejects acceptance and runs nothing, and a retry runs the turn once. Both tests fail on unpatched libfx. fx0 core 170, auth 261, trace 60, typecheck and build pass; the Vercel build log shows the patch applied.
 
@@ -416,7 +418,34 @@ The preview no longer waits for `/api/session`. In one candidate sample `/api/se
 
 Admission is the stage the patch changes and the least noisy measure. The warm Sending and first-text deltas are larger than the admission saving: one baseline sample landed on a new process (pair 3), and first text carries AI Gateway variance.
 
-**Read.** About 100–130 ms off every warm prompt and about half a second off a new instance's first prompt, with the same durability guarantees. Next: propose it in vercel-labs/fx (`sdk/durable.js`) with the TLA+ admission model updated, coordinated with the planned queue API change.
+**Decision after review.** The measured latency reductions are experimental results, not a shippable improvement: enqueue-before-log is rejected because it can remove a retry's recovery obligation. The original tests recorded queue sends but neither delivered nor deduplicated them, so their passing results did not prove recovery. Do not propose that reorder as a safe SDK change.
+
+Only the independent viewer-start/log-read overlap remains a candidate. It keeps persistence before queueing and waits for the viewer start before writing. Validation uses current `vercel-labs/fx` main (`7f2383af7`), whose log-view handoff has changed since libfx 0.0.14. A first reduced version marked admission as sent too early: aborting during the cursor lookup stored a targeted cancel and consumed the message ID. A gated abort/same-ID-retry regression now catches that error. The revised candidate starts only a speculative read early and preserves the cursor/abort check before admission.
+
+Local validation of the revised candidate: `zig build libfx-napi -Dnapi-surface=core` exit 0; `node sdk/tests/test-durable-core.mjs` passed on memory (55), local (52), world (54), and queue (72); `node sdk/tests/test-durable.mjs <backend> native` passed on memory (61), local (58), and world (55). The native retry-check test's fixture now targets the intended observer read instead of accidentally blocking the preceding worker's tail read. The World runs emitted closed-listener redelivery warnings but passed. The eight bounded admission configurations returned their expected pass/counterexample verdicts, and the existing DurableSession send/queue, PromptIntake, and TenantIsolation route configs passed. These are focused checks, not the full TLA driver matrix or a live Vercel recovery test.
+
+The earlier Experiment 2's ~44 ms stage improvement is historical evidence only; the reduced change has no fresh end-to-end A/B or current-commit CI yet. No SDK PR has been published from this validation work.
+
+## Experiment 11: corrected read-only admission overlap on the current SDK
+
+**Scope.** This replaces Experiment 10's unsafe queue-before-log proposal with a read-only optimization. SDK base `7f2383af7`; measured implementation `4570701a6` on `esteban/overlap-admission-reads`. The sender's log read starts alongside the viewer's stream-position lookup. Only after that lookup resolves and cancellation is checked does admission begin. Persistence still precedes queue send; acceptance still waits for both. No World or Queues API changes, no skipped history reads, and no assumptions that a new session is empty.
+
+**Packaging.** Two private preview-only fx0 branches, `esteban/fx0-perf-viewer-baseline` (`012a0e7`) and `esteban/fx0-perf-viewer-candidate` (`997f413`), contain local experimental packages built from that SDK source. They have identical native/WebAssembly engines and bundled Worlds. Only `durable.js` and its generated CommonJS bundle differ. A later SDK follow-up (`b6e2bcabf`) changes comments and model documentation only; independent minified builds of the measured and final `durable.js` are byte-identical (SHA-256 `b730c68d6a98def7b3218165132655f83578020db2daea0afddc48ecbd02d9d3`). Neither fx0 benchmark branch is intended to merge.
+
+**Method.** Lab `~/.fx0-perf-labs/viewer-current-sdk-20261027-165102`; 8 balanced A/B pairs, 1 warmup per side excluded, persistent dedicated Chrome profile, real Vercel previews and real model traffic. Every prompt creates a new chat and requests the same short reply without tools. All 16 measured runs completed with full traces and no failures.
+
+| Metric | Baseline p50 | Candidate p50 | Median paired delta | Candidate faster |
+| --- | ---: | ---: | ---: | ---: |
+| SDK admission (`prompt.accepted`) | 537 ms | 511 ms | -47 ms | 5/8 |
+| HTTP POST to acceptance (`sendingMs`) | 822 ms | 786 ms | -56 ms | 6/8 |
+| Prompt-start mark to acceptance | 1,174 ms | 1,058 ms | -156 ms | 6/8 |
+| Prompt-start mark to first text | 2,126 ms | 2,638 ms | -113 ms | 5/8 |
+
+The delta is the median of candidate-minus-baseline within each pair, not the difference of the marginal p50 values. `sendingMs` measures POST start to acceptance, not the entire prompt-start-to-acceptance interval. Two baseline runs paid backend initialization costs (349 and 364 ms), including one whose request was not the process's first. In the 6 pairs with both backends already initialized, admission's paired median remains -47 ms (4/6 faster); POST-to-acceptance is -26 ms (4/6 faster).
+
+**Mechanism and limits.** Initial World reads overlap in 8/8 candidate traces and 0/8 baseline traces; both still make 6 World calls during new-chat admission. The measured saving is small and noisy. No statistical significance or first-text improvement is claimed: marginal and paired first-text summaries disagree and per-pair model variation is large. Follow-ups and a controlled cold-start cohort were not benchmarked. The larger Experiment 10 numbers do not apply to this change.
+
+**Validation.** The corrected implementation passes the scripted core matrix, real native and WebAssembly durable suites, cancellation/same-ID reuse tests, and focused TLA+ checks. The PR-shaped branch excludes the rejected backstop experiment and its extra fixture tests. Its queue suite passes 68 tests. Final pre-push review and exact-commit CI remain separate gates; these measurements do not imply merge readiness.
 
 ## Candidate ideas
 
