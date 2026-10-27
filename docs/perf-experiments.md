@@ -371,6 +371,27 @@ The preview no longer waits for `/api/session`. In one candidate sample `/api/se
 
 **Next steps.** In fx0, start the backend load at the start of the handler so it overlaps auth and the journal (start early, await late), instead of warming. In libfx/World: fewer serial World calls in admission is the largest warm-path saving for every prompt; the first Queues send needs its request split (body sent versus response) or the Queues team.
 
+## Experiment 9: run each turn from its queue delivery (libfx queue hop)
+
+**Question.** libfx 0.0.14 runs a prompt's turn inside `/api/prompt` (`vercel()` sets `queueLeases`, so `runInRequest`) and sends Vercel Queues only a delayed backstop. Workflow/libfx maintainers consider that path unsafe until a new queue API ships, and plan to move libfx to it. What would fx0 pay if the turn started from the queue delivery instead?
+
+**Change** (branch `esteban/fx0-perf-queue-hop`, `e21075b`, never merge): an install-time patch of libfx 0.0.14 (exact version, one match per file in `node.js` and `node.cjs`) makes the default durability `vercel({ leaseMs: 30000 })`. That turns `queueLeases` and `runInRequest` off: the prompt is queued without a delay and the turn runs when Queues delivers it to `/api/libfx`, already in the same Vercel function group as `/api/prompt`. The Vercel build log confirmed the patch; locally the patched default reports `queueLeases: false, runInRequest: false` and backend init is unchanged.
+
+**Result** (labs `~/.fx0-perf-labs/queue-hop-cold` and `queue-hop-warm`; 0 failures; small samples, descriptive only):
+
+| | Turn in the request (today) | Turn from the queue | Paired delta (median) |
+| --- | ---: | ---: | ---: |
+| Cold, 3 pairs: Sending | 2,666 ms | 2,313 ms | −353 ms |
+| Cold, 3 pairs: first text | 4,531 ms | 5,007 ms | **+349 ms** (3 of 3 slower) |
+| Warm, 4 pairs: Sending | 1,111 ms | 968 ms | +98 ms |
+| Warm, 4 pairs: first text | 2,423 ms | 2,243 ms | −1 ms (deltas +154, −157, −568, +333) |
+
+- On a new instance the queue hop costs ~350 ms before the model starts; Sending drops because `/api/prompt` no longer starts the turn.
+- Warm, no difference is detectable at this sample size: the paired deltas spread ±500 ms, mostly AI Gateway variance.
+- Only `/api/prompt` is traced: a queue delivery carries no trace id, so the turn's server spans in `/api/libfx` are not collected. First text is measured in the browser and includes the hop.
+
+**Read.** Moving libfx to a queue-started turn would cost fx0 about a third of a second on cold prompts, and little or nothing measurable on warm ones, as long as `/api/libfx` stays in the prompt's function group. Re-measure with the real queue API before upgrading libfx.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |
