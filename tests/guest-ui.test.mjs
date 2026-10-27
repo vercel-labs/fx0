@@ -325,6 +325,74 @@ test('an existing paid chat cannot claim free prompts; switching chats and new d
   assert.equal(ui.requests.filter(({ url }) => url === '/api/session?session=trial-chat').length, 1)
 })
 
+test('opening an uncached chat moves to its URL and an empty chat at once; a later click wins; a failed load returns to a new chat', async (t) => {
+  const summary = (id) => ({ id, title: id, createdAt: 1, lastActivity: 1, busy: false })
+  const snapshot = (id) => Response.json({ transcript: compactTranscript([{ type: 'user', seq: 1, id: 1, text: `Design ${id}` }], guestBoot.view), summary: summary(id) })
+  let releaseSlow
+  const slow = new Promise((resolve) => { releaseSlow = resolve })
+  const ui = browser(t, {
+    '/api/events?session=one&after=1': () => new Response(''),
+    '/api/events?session=fast&after=1': () => new Response(''),
+    '/api/model?session=one': () => Response.json({ model: '', effort: '', fast: false }),
+    '/api/model?session=fast': () => Response.json({ model: '', effort: '', fast: false }),
+    '/api/session?session=slow': () => slow.then(() => snapshot('slow')),
+    '/api/session?session=fast': () => snapshot('fast'),
+    '/api/session?session=broken': () => new Response('unavailable', { status: 503 }),
+  })
+  const pushes = []
+  const replaces = []
+  window.history.pushState = (_state, _title, url) => { pushes.push(String(url)); window.location.search = new URL(String(url)).search }
+  window.history.replaceState = (_state, _title, url) => { replaces.push(String(url)); window.location.search = new URL(String(url)).search }
+  const classes = new Set()
+  document.documentElement.classList = { add: (name) => classes.add(name), remove: (name) => classes.delete(name), toggle() {}, contains: (name) => classes.has(name) }
+  t.mock.method(console, 'error', () => {})
+  const app = mount(t, ui, {
+    ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null },
+    sessionId: 'one', sessions: [summary('one'), summary('slow'), summary('fast'), summary('broken')],
+    events: [{ type: 'user', seq: 1, id: 1, text: 'Design one' }],
+  })
+  await tick()
+  app.render()
+  const rail = () => find(app.tree(), (node) => node.type === Sidebar).props
+  const entries = () => find(app.tree(), (node) => node.type === Transcript).props.entries
+
+  // The click moves at once: URL, highlighted item and the empty chat, before any response.
+  rail().onSelect('slow')
+  assert.match(pushes.at(-1), /[?&]s=slow\b/, 'the URL names the chat in the click itself')
+  assert.ok(classes.has('chat-url'), 'the empty chat shows its loading skeleton')
+  app.render()
+  assert.equal(rail().activeId, 'slow', 'the clicked chat is highlighted at once')
+  assert.deepEqual(entries(), [], 'the previous chat is no longer shown')
+
+  // Typing while it opens does not reserve a new draft chat.
+  find(app.tree(), (node) => node.type === Composer).props.onDraftInput('typed while loading')
+  await tick()
+  assert.equal(ui.requests.filter(({ url }) => url === '/api/sessions').length, 0, 'no draft reservation while a chat opens')
+
+  // A later click wins; the slow response that lands afterwards is dropped.
+  rail().onSelect('fast')
+  await tick()
+  app.render()
+  assert.equal(entries()[0]?.text, 'Design fast')
+  releaseSlow()
+  await tick()
+  await tick()
+  app.render()
+  assert.equal(entries()[0]?.text, 'Design fast', 'the earlier load does not replace the chat clicked later')
+  assert.equal(rail().activeId, 'fast')
+  assert.ok(!classes.has('chat-url'))
+
+  // A failed load returns to a new chat with the usual notice, not an endless skeleton.
+  rail().onSelect('broken')
+  await tick()
+  await tick()
+  app.render()
+  assert.ok(!classes.has('chat-url'), 'no skeleton is left behind')
+  assert.doesNotMatch(replaces.at(-1), /[?&]s=/, 'the URL no longer names the chat that failed')
+  assert.equal(rail().activeId, 'draft')
+  assert.ok(find(app.tree(), (node) => node.props?.role === 'alert' && node.props.children === 'Unable to load that session. Try again.'))
+})
+
 test('the first prompt response retains trial eligibility when a signed-in draft becomes a cached chat', async (t) => {
   t.mock.method(console, 'info', () => {})
   const ui = browser(t, {
