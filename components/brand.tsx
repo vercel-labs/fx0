@@ -4,7 +4,7 @@ import type { MouseEvent } from 'react'
 
 // A real link home, so a new tab or a copied link work; a plain click opens the
 // empty draft in place (onHome) instead of reloading the app.
-export default function Brand({ onHome }: { onHome: () => void }) {
+export default function Brand({ href = '/', onHome }: { href?: string; onHome: () => void }) {
   function onClick(event: MouseEvent<HTMLAnchorElement>) {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
     event.preventDefault()
@@ -13,7 +13,7 @@ export default function Brand({ onHome }: { onHome: () => void }) {
 
   return (
     <a
-      href="/"
+      href={href}
       aria-label="fx0 home"
       onClick={onClick}
       className="-mx-1 block px-1 py-1 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
