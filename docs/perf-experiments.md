@@ -351,6 +351,26 @@ The preview no longer waits for `/api/session`. In one candidate sample `/api/se
 
 **What remains.** The preview, ~600–700 ms: one round trip to `iad1` plus ~150 KB. It cannot be prefetched or cached as served, because every response carries per-response tokens (ready token, remote-image token). Options: make the frame cacheable per revision (move the tokens out of the document), or move the capture runtime out of the frame (CSP design). Both need a security review.
 
+## Cold start and admission: connection time versus server time
+
+**Instrumentation** (`bd7f219`): undici's `undici:client:beforeConnect`/`connected`/`connectError` give each new connection (DNS, TCP, TLS) a `connect.<category>` span inside the request that opened it. undici hands `connected` a copy of `connectParams` and the same `connector`, so attempts pair by connector and destination; the destination is never recorded.
+
+**libfx backend init** (first `newSessionId()`): libfx loads `durable/vercel.mjs` (1.2 MB) with a dynamic `import()` marked `webpackIgnore`/`turbopackIgnore`, so Next does not bundle it. Locally the whole first `newSessionId()` takes what that import takes (~70 ms) and the second 0 ms: the cost is loading the module, not setup logic. On Vercel it measured 333–459 ms on a new instance.
+
+**Measurement** (lab `~/.fx0-perf-labs/connect-split`; 2 cold prompts on fresh deployments and 4 warm; 0 failures):
+
+| Calls inside `/api/prompt` | New connection | Of it, connect | Reused connection |
+| --- | ---: | ---: | ---: |
+| World API (36 calls) | 14, median 70 ms | 13 ms | 22, median 89 ms |
+| Vercel Queues (6 sends) | 6, median 148 ms | 34 ms | none: every send opened a connection |
+| Redis (46) | 18, median 18 ms | 19 ms | 28, median 3 ms |
+
+- **Distance is not the cost.** Connecting to the World API and Queues takes 10–47 ms (TCP + TLS), so they are a few ms away from iad1. Each World call spends ~50–150 ms after connecting: that is server time, and admission makes six of them in series (542–836 ms warm here).
+- **The first Queues send of a process is slow on the server side:** 389 and 403 ms, of which 14 and 43 ms were connecting. Later sends take 46–148 ms. It is per process (earlier labs: 24 of 27 new processes, in deployments of any age), not per deployment.
+- Queue sends never reuse a connection, and about a third of World calls open a new one even on a warm instance (10–47 ms each).
+
+**Next steps.** In fx0, start the backend load at the start of the handler so it overlaps auth and the journal (start early, await late), instead of warming. In libfx/World: fewer serial World calls in admission is the largest warm-path saving for every prompt; the first Queues send needs its request split (body sent versus response) or the Queues team.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |
