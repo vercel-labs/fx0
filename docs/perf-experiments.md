@@ -256,6 +256,33 @@ Vercel keeps started-but-uninitialized Node processes, and routes prompts to the
 
 **Measurement note.** First text on these previews is dominated by AI Gateway variance (34 ms to 3.3 s to headers), so small samples cannot judge it. Sending, and the stage that a change touches, are the metrics to compare.
 
+## Opening a chat from the history sidebar (user report)
+
+**Report.** A user recording showed: click a history chat → the item says "loading" while the URL and the screen stay on the previous view for ~1 s → the chat appears → the preview fills in over ~2 s more. Feedback: "move immediately to the next url, and render a fallback synchronously, like empty."
+
+**Code.** `switchSession` (`components/chat-app.tsx`) awaits `loadSession` (`GET /api/session`) before `showSession` and `history.pushState`. `switchingTo` also blocks other clicks while it loads. The preview iframe (`/api/artifact-frame`) can only start after the snapshot arrives, because it needs the revision.
+
+**Measurement.** `scripts/perf-switch.mjs` loads the app fresh, hovers a history item for 300 ms (the app prefetches on hover), clicks with real input events, and records numbers only: click → URL, chat painted, preview presented, plus Resource Timing for `/api/session` and `/api/artifact-frame`. It used 6 seeded test chats with a minimal design (workload `design-tiny`), never personal chats. Baseline, 6 samples (lab `~/.fx0-perf-labs/switch-baseline`):
+
+| From the click | Sample 0 (cold) | Samples 1–5 |
+| --- | ---: | ---: |
+| `/api/session` starts | −304 ms (hover prefetch) | −302 ms |
+| `/api/session` ends = URL changes | 796 ms | 151–223 ms |
+| Chat painted | 833 ms | 184–245 ms |
+| Preview presented | 1295 ms | 547–779 ms |
+
+**Where the time goes.**
+
+- `/api/session` waits 452–525 ms for its first byte (1088 ms cold); its handler takes 15–64 ms (236 ms on a first request after 14 idle minutes). Every function request pays a ~200–300 ms floor from here: the edge `gru1` forwards to the function in `iad1` (`/api/teams` costs the same). `/api/session` has `maxDuration = 300`, so it is its own function and is often cold.
+- The preview is requested only after the snapshot (serial), then downloads in 100–410 ms. It is one 122 KB script (raw; ~35 KB on the wire), 97 KB of which is the fast-snap capture runtime inlined into every frame.
+
+**Candidates, in order of expected effect.**
+
+1. Navigate immediately: `pushState` and an empty chat shell in the click's frame; fill in when data arrives; drop the `switchingTo` block (a later click wins). URL and shell at ~0 ms instead of 150–800 ms.
+2. Start the preview in parallel with `/api/session`: carry the latest design revision in the history list, so the iframe starts at click (or on hover) instead of after the snapshot. Expected ~200–400 ms earlier.
+3. Put `/api/session` GET in a warm function group (same `maxDuration` grouping lesson as Experiment 3). Removes the ~0.6–0.9 s cold case.
+4. Serve the capture runtime as a cached, same-origin static script instead of inlining 97 KB per frame. Security-sensitive (frame CSP and sandbox), so last.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |
