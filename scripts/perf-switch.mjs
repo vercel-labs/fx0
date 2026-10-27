@@ -26,6 +26,8 @@ function parse(args) {
     else if (flag === '--samples') options.samples = Number(value)
     else if (flag === '--hover-ms') options.hoverMs = Number(value)
     else if (flag === '--label') options.label = value
+    else if (flag === '--match') options.match = value
+    else if (flag === '--settle-ms') options.settleMs = Number(value)
     else throw new Error(`Unknown argument ${flag}`)
   }
   if (!options.profile || !options.url || !options.out) throw new Error('--profile, --url and --out are required')
@@ -48,12 +50,16 @@ async function waitFor(cdp, expression, timeoutMs, label) {
 }
 
 // Picks the index-th history item that is not a lab "Reply exactly OK" chat (those have
-// no design). The title is read only to filter and is never returned.
-const pickItem = (skip) => `(() => {
+// no design), or, with --match, whose title contains that text. The title is read only
+// to filter and is never returned.
+const pickItem = (skip, match) => `(() => {
   const items = [...document.querySelectorAll(${JSON.stringify(ITEM)})]
     .filter(button => !button.disabled && button.getAttribute('aria-current') !== 'page'
-      && !button.textContent.includes(${JSON.stringify(LAB_PROMPT.slice(0, 20))}));
-  const button = items[${skip}];
+      && (${JSON.stringify(match ?? null)} === null
+        ? !button.textContent.includes(${JSON.stringify(LAB_PROMPT.slice(0, 20))})
+        : button.textContent.includes(${JSON.stringify(match ?? '')})));
+  // Samples cycle through the matching chats.
+  const button = items.length ? items[${skip} % items.length] : null;
   if (!button) return null;
   button.scrollIntoView({ block: 'center' });
   const box = button.getBoundingClientRect();
@@ -95,7 +101,8 @@ const collect = `(() => {
     .filter(at => marks.down != null && at >= marks.down).sort((a, b) => a - b)[0] ?? null;
   const resource = (match) => {
     const entry = performance.getEntriesByType('resource').filter(e => e.name.includes(match)).sort((a, b) => b.startTime - a.startTime)[0];
-    return entry ? { start: entry.startTime, ttfb: entry.responseStart, end: entry.responseEnd } : null;
+    return entry ? { start: entry.startTime, ttfb: entry.responseStart, end: entry.responseEnd,
+      transferKB: Math.round(entry.transferSize / 102.4) / 10, decodedKB: Math.round(entry.decodedBodySize / 102.4) / 10 } : null;
   };
   return { marks, presented, session: resource('/api/session?'), frame: resource('/api/artifact-frame'),
     hasFrame: !!document.querySelector('iframe[src*="/api/artifact-frame"]') };
@@ -108,8 +115,8 @@ async function sample(options, index) {
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false })
     await cdp.send('Page.navigate', { url: options.url.origin + '/' })
     await waitFor(cdp, `location.origin === ${JSON.stringify(options.url.origin)} && !!document.querySelector(${JSON.stringify(ITEM)}) && !!window.__fx0Trace`, 30000, 'history sidebar')
-    await delay(1500) // let first-paint work settle
-    const target = await cdp.evaluate(pickItem(index))
+    await delay(options.settleMs ?? 1500) // a person looks at the page before clicking
+    const target = await cdp.evaluate(pickItem(index, options.match))
     if (!target) throw new Error('Not enough design chats in the history')
     await cdp.evaluate(instrument)
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y })
@@ -130,8 +137,10 @@ async function sample(options, index) {
       clickToContent: rel(raw.marks.content), clickToPainted: rel(raw.marks.painted),
       clickToPreview: rel(raw.presented), hasPreview: raw.hasFrame,
       // Resource timings relative to the click; a negative start means the hover prefetch began it.
-      session: raw.session && { start: rel(raw.session.start), ttfb: rel(raw.session.ttfb), end: rel(raw.session.end) },
-      frame: raw.frame && { start: rel(raw.frame.start), ttfb: rel(raw.frame.ttfb), end: rel(raw.frame.end) },
+      session: raw.session && { start: rel(raw.session.start), ttfb: rel(raw.session.ttfb), end: rel(raw.session.end),
+        transferKB: ms(raw.session.transferKB), decodedKB: ms(raw.session.decodedKB) },
+      frame: raw.frame && { start: rel(raw.frame.start), ttfb: rel(raw.frame.ttfb), end: rel(raw.frame.end),
+        transferKB: ms(raw.frame.transferKB), decodedKB: ms(raw.frame.decodedKB) },
     }
   } finally { await browser.close() }
 }
@@ -144,7 +153,7 @@ export async function main(args = process.argv.slice(2)) {
     try {
       const result = await sample(options, index)
       results.push(result)
-      console.log(`${options.label} #${index}: url ${result.clickToUrl} ms, chat shown ${result.clickToActivePainted} ms, content ${result.clickToPainted} ms, preview ${result.clickToPreview} ms, /api/session ${result.session?.start}..${result.session?.end} ms`)
+      console.log(`${options.label} #${index}: url ${result.clickToUrl} ms, chat shown ${result.clickToActivePainted} ms, content ${result.clickToPainted} ms, preview ${result.clickToPreview} ms, /api/session ${result.session?.start}..${result.session?.end} ms (${result.session?.decodedKB} KB), frame ${result.frame?.decodedKB} KB`)
     } catch (error) {
       console.error(`${options.label} #${index} failed: ${error.message}`)
       results.push({ index, failed: true })

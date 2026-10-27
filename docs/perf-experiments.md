@@ -330,6 +330,27 @@ The preview no longer waits for `/api/session`. In one candidate sample `/api/se
 
 **D (capture runtime out of every frame) is not part of this change.** It would cut ~95 KB raw (~29 KB brotli) from each preview, but loading it as a shared script means widening the design document's CSP to allow a same-origin script. That needs its own security design, not a performance tweak.
 
+## Experiment 8: realistic chats, no hover, and recent chats loaded in the background
+
+**Realistic measurement.** Two test chats with four design turns each (workload `design-long`), no hover before the click (`--hover-ms 0`: touch or a quick click), labs `~/.fx0-perf-labs/switch-long` and `switch-recent`.
+
+- Chat size is not the bottleneck: a four-turn chat's `/api/session` response is 6.5–7 KB (designs are not in the transcript), and processing plus rendering takes ~30 ms after the response. The preview document is ~150 KB raw (design ~50 KB + capture runtime ~97 KB).
+- Without hover, content waits the whole `/api/session` round trip: ~475 ms median.
+- An earlier trigger is not available: `fastClick` already selects on pointer-down, and focus already prefetches.
+
+**Change** (commit `5254116` on the experiment branch; `19f1986` on PR #38): once per page, when the app is idle after the history arrives, the three most recent other chats load through the same path as hovering one, within the client cache of five chats. A UI test covers the selection (only those three, once per page) and opening from the cache, and fails when the background load is removed.
+
+**Result** (8 samples per case, no hover, 3 s after load):
+
+| Median from the click | Baseline | A + B + background |
+| --- | ---: | ---: |
+| Recent chat: content | 475 ms | **30 ms** (27–31 ms in every sample) |
+| Recent chat: preview | 956 ms | **715 ms** |
+| Older chat: content | 370 ms | 392 ms (unchanged within noise) |
+| Older chat: preview | 901 ms | **602 ms** |
+
+**What remains.** The preview, ~600–700 ms: one round trip to `iad1` plus ~150 KB. It cannot be prefetched or cached as served, because every response carries per-response tokens (ready token, remote-image token). Options: make the frame cacheable per revision (move the tokens out of the document), or move the capture runtime out of the frame (CSP design). Both need a security review.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |
