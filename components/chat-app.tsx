@@ -987,6 +987,28 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     if (hasIdentity && !authBlocked && id !== 'draft' && id !== sessionId) void loadSession(id).catch(() => {})
   }
 
+  // Once per page, when the app is idle after the history arrives, the most recent chats
+  // load in the background (as hovering one does), so opening them shows their content
+  // at once. They stay within the client cache's five chats.
+  const recentPrefetched = useRef(false)
+  useEffect(() => {
+    if (recentPrefetched.current || !sidebarReady || !hasIdentity || authBlocked) return
+    const run = () => {
+      if (recentPrefetched.current) return
+      recentPrefetched.current = true
+      for (const session of sessions.filter((session) => session.id !== activeSession.current).slice(0, 3)) prefetchSession(session.id)
+    }
+    const idleApi = typeof requestIdleCallback === 'function' && typeof cancelIdleCallback === 'function'
+    const idle = idleApi ? requestIdleCallback(run, { timeout: 3000 }) : setTimeout(run, 1500)
+    return () => {
+      if (idleApi) cancelIdleCallback(idle as number)
+      else clearTimeout(idle as ReturnType<typeof setTimeout>)
+    }
+    // run reads the current list and auth through this render's closure; re-arm only
+    // when readiness or auth changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebarReady, hasIdentity, authBlocked])
+
   // The chat the latest switch is moving to; a later click replaces it, and an earlier
   // load that finishes afterwards is dropped.
   const switchTarget = useRef<string | null>(null)

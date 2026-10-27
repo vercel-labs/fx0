@@ -397,6 +397,44 @@ test('opening an uncached chat moves to its URL and an empty chat at once; a lat
   assert.ok(find(app.tree(), (node) => node.props?.role === 'alert' && node.props.children === 'Unable to load that session. Try again.'))
 })
 
+test('once idle, the three most recent other chats load in the background and then open from the cache', async (t) => {
+  const summary = (id, at) => ({ id, title: id, createdAt: 1, lastActivity: at, busy: false })
+  const snapshot = (id) => Response.json({ transcript: compactTranscript([{ type: 'user', seq: 1, id: 1, text: `Design ${id}` }], guestBoot.view), summary: summary(id, 1) })
+  const ui = browser(t, {
+    '/api/events?session=one&after=1': () => new Response(''),
+    '/api/events?session=a&after=1': () => new Response(''),
+    '/api/model?session=one': () => Response.json({ model: '', effort: '', fast: false }),
+    '/api/model?session=a': () => Response.json({ model: '', effort: '', fast: false }),
+    '/api/session?session=a': () => snapshot('a'),
+    '/api/session?session=b': () => snapshot('b'),
+    '/api/session?session=c': () => snapshot('c'),
+  })
+  const app = mount(t, ui, {
+    ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null },
+    sessionId: 'one', sessions: [summary('one', 9), summary('a', 8), summary('b', 7), summary('c', 6), summary('d', 5)],
+    events: [{ type: 'user', seq: 1, id: 1, text: 'Design one' }],
+  })
+  await tick()
+  app.render()
+  const sessionRequests = () => ui.requests.filter(({ url }) => url.startsWith('/api/session?')).map(({ url }) => url)
+  assert.deepEqual(sessionRequests(), [], 'nothing loads before the app is idle')
+  for (const run of ui.timers.splice(0)) run()
+  await tick()
+  assert.deepEqual(sessionRequests().sort(), ['/api/session?session=a', '/api/session?session=b', '/api/session?session=c'],
+    'the open chat and older chats are not loaded')
+  app.render()
+  for (const run of ui.timers.splice(0)) run()
+  await tick()
+  assert.equal(sessionRequests().length, 3, 'once per page')
+
+  const rail = () => find(app.tree(), (node) => node.type === Sidebar).props
+  rail().onSelect('a')
+  await tick()
+  app.render()
+  assert.equal(find(app.tree(), (node) => node.type === Transcript).props.entries[0]?.text, 'Design a')
+  assert.equal(sessionRequests().filter((url) => url.endsWith('=a')).length, 1, 'opening it uses the background load')
+})
+
 test('the first prompt response retains trial eligibility when a signed-in draft becomes a cached chat', async (t) => {
   t.mock.method(console, 'info', () => {})
   const ui = browser(t, {
