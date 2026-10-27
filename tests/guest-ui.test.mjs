@@ -348,7 +348,7 @@ test('opening an uncached chat moves to its URL and an empty chat at once; a lat
   t.mock.method(console, 'error', () => {})
   const app = mount(t, ui, {
     ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null },
-    sessionId: 'one', sessions: [summary('one'), summary('slow'), summary('fast'), summary('broken')],
+    sessionId: 'one', sessions: [summary('one'), { ...summary('slow'), artifactRevision: 3 }, summary('fast'), summary('broken')],
     events: [{ type: 'user', seq: 1, id: 1, text: 'Design one' }],
   })
   await tick()
@@ -363,6 +363,9 @@ test('opening an uncached chat moves to its URL and an empty chat at once; a lat
   app.render()
   assert.equal(rail().activeId, 'slow', 'the clicked chat is highlighted at once')
   assert.deepEqual(entries(), [], 'the previous chat is no longer shown')
+  const preview = () => find(app.tree(), (node) => node.type === PreviewPane)?.props
+  assert.deepEqual(preview()?.source, { kind: 'design', sessionId: 'slow', revision: 3 },
+    'the preview starts loading the listed design before the transcript arrives')
 
   // Typing while it opens does not reserve a new draft chat.
   find(app.tree(), (node) => node.type === Composer).props.onDraftInput('typed while loading')
@@ -380,6 +383,7 @@ test('opening an uncached chat moves to its URL and an empty chat at once; a lat
   app.render()
   assert.equal(entries()[0]?.text, 'Design fast', 'the earlier load does not replace the chat clicked later')
   assert.equal(rail().activeId, 'fast')
+  assert.equal(preview()?.source.sessionId, 'fast', 'the dropped chat\'s early preview is gone')
   assert.ok(!classes.has('chat-url'))
 
   // A failed load returns to a new chat with the usual notice, not an endless skeleton.

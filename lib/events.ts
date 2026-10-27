@@ -85,6 +85,9 @@ export interface SessionInfo {
   busy: boolean
   // The chat's stored picker settings, so switching to it needs no settings request.
   generation?: { model: string; effort: string; fast: boolean }
+  // The latest published design revision, when there is one, so opening the chat can
+  // start loading its preview while the transcript is still on its way.
+  artifactRevision?: number
 }
 
 export interface SessionPage {

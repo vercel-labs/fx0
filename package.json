@@ -9,7 +9,7 @@
     "build": "next build",
     "typecheck": "next typegen && tsc --noEmit --incremental false",
     "start": "next start",
-    "test:core": "node --experimental-strip-types --test tests/core.test.mjs tests/transcript.test.mjs tests/design-draft.test.mjs tests/design-publish.test.mjs tests/event-delivery.test.mjs tests/event-stream.test.mjs tests/public-fetch.test.mjs tests/remote-image.test.mjs tests/prompt-images.test.mjs tests/design-assets.test.mjs tests/capture-protocol.test.mjs tests/runtime.test.mjs",
+    "test:core": "node --experimental-strip-types --test tests/core.test.mjs tests/session-summary.test.mjs tests/transcript.test.mjs tests/design-draft.test.mjs tests/design-publish.test.mjs tests/event-delivery.test.mjs tests/event-stream.test.mjs tests/public-fetch.test.mjs tests/remote-image.test.mjs tests/prompt-images.test.mjs tests/design-assets.test.mjs tests/capture-protocol.test.mjs tests/runtime.test.mjs",
     "test:trace": "node --experimental-strip-types --test tests/performance-trace.test.mjs tests/trace-browser.test.mjs tests/prompt-trace.test.mjs tests/trace-report.test.mjs tests/trace-config.test.mjs",
     "test:trace:browser": "node --experimental-strip-types --test tests/trace-browser.browser.mjs",
     "test:perf": "node --experimental-strip-types --test tests/performance.browser.mjs",

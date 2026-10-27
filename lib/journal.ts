@@ -341,11 +341,13 @@ export const readTranscript = createTranscriptReader({
     const values: Record<string, string> = {}
     for (let i = 0; i < fields.length; i += 2) values[fields[i]] = fields[i + 1]
     const stored = parseStoredSession(id, values)
+    const view = sessionView(values)
     return {
       previous: previous ? parseJson<TranscriptSnapshot>(previous) : null,
       events: tail.map((item) => parseJson<StreamItem>(item)),
-      view: sessionView(values),
-      summary: stored ? { id, title: stored.title, createdAt: stored.createdAt, lastActivity: stored.lastActivity, busy: busy > 0, ...(stored.trialChat ? { trialChat: true as const } : {}) } : null,
+      view,
+      summary: stored ? { id, title: stored.title, createdAt: stored.createdAt, lastActivity: stored.lastActivity, busy: busy > 0, ...(stored.trialChat ? { trialChat: true as const } : {}),
+        ...(view.artifactRevision > 0 ? { artifactRevision: view.artifactRevision } : {}) } : null,
     }
   },
   publish: publishTranscriptSnapshot,
@@ -528,19 +530,22 @@ export async function readSessionSummaries(ids: string[]): Promise<SessionInfo[]
     const batch = ids.slice(offset, offset + 200)
     const pipeline = redis().pipeline()
     for (const id of batch) {
-      pipeline.hmget(key(id, 'state'), 'id', 'createdAt', 'lastActivity', 'title', 'trialChat', 'preferredModel', 'preferredEffort', 'preferredFast')
+      pipeline.hmget(key(id, 'state'), 'id', 'createdAt', 'lastActivity', 'title', 'trialChat', 'preferredModel', 'preferredEffort', 'preferredFast', 'artifactRevision')
       pipeline.exists(key(id, 'active'))
       pipeline.get(key(id, 'message-seq'))
     }
     const values = await pipeline.exec()
     for (let index = 0; index < batch.length; index++) {
       if (Number(values[index * 3 + 2] ?? 0) < 1) continue
-      const state = parseStoredSession(batch[index], values[index * 3] as Record<string, unknown> | null)
+      const fields = values[index * 3] as Record<string, unknown> | null
+      const state = parseStoredSession(batch[index], fields)
       if (!state) continue
+      const { artifactRevision } = sessionView(fields)
       sessions.push({ id: state.id, title: state.title, createdAt: state.createdAt,
         lastActivity: state.lastActivity, busy: Number(values[index * 3 + 1] ?? 0) > 0,
         ...(state.trialChat ? { trialChat: true as const } : {}),
-        generation: { model: state.preferredModel ?? '', effort: state.preferredEffort ?? '', fast: state.preferredFast ?? false } })
+        generation: { model: state.preferredModel ?? '', effort: state.preferredEffort ?? '', fast: state.preferredFast ?? false },
+        ...(Number.isSafeInteger(artifactRevision) && artifactRevision > 0 ? { artifactRevision } : {}) })
     }
   }
   return sessions.sort((a, b) => b.lastActivity - a.lastActivity).slice(0, 100)

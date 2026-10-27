@@ -406,6 +406,9 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   const [startedTurns, setStartedTurns] = useState<Set<number>>(initialState.startedTurns)
   const [streamStartSeq, setStreamStartSeq] = useState(initialState.lastSeq)
   const [switchingTo, setSwitchingTo] = useState<string | null>(null)
+  // While an uncached chat opens: its latest design revision from the history list, so
+  // the preview starts loading alongside the transcript instead of after it.
+  const [switchPreview, setSwitchPreview] = useState<{ sessionId: string; revision: number } | null>(null)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   // The session rail drags through SidebarGestures; this tracks the conversation pane.
   const [agentResizing, setAgentResizing] = useState(false)
@@ -1002,6 +1005,8 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     }
     const cached = eventCache.current.get(id)
     switchTarget.current = id
+    const listedRevision = sessions.find((session) => session.id === id)?.artifactRevision
+    setSwitchPreview(!cached && listedRevision ? { sessionId: id, revision: listedRevision } : null)
     if (!cached) {
       document.documentElement.classList.add('chat-url')
       clearChatView()
@@ -1026,6 +1031,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
       if (switchTarget.current === id) {
         switchTarget.current = null
         setSwitchingTo(null)
+        setSwitchPreview(null)
       }
     }
   }
@@ -2193,7 +2199,11 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
             </div>
             {region((view) => (
               <PreviewPane
-                source={{ kind: 'design', sessionId: view.sessionId, revision: view.snapshot.transcript.view.artifactRevision }}
+                source={switchPreview && view.sessionId === 'draft'
+                  // The opening chat's listed revision; its snapshot later names the same
+                  // source, so the frame keeps loading instead of starting over.
+                  ? { kind: 'design', ...switchPreview }
+                  : { kind: 'design', sessionId: view.sessionId, revision: view.snapshot.transcript.view.artifactRevision }}
                 viewing={viewing}
                 draft={designDraft?.html ?? null}
                 accessAllowed={!authBlocked && signOutStatus == null}

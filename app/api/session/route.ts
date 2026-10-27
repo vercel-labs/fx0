@@ -5,10 +5,7 @@ import { removeOwnedSession } from '../../../lib/accounts'
 import { withSessionRoute } from '../../../lib/route-auth'
 import { after } from 'next/server.js'
 
-// The same maxDuration as /api/prompt, so Vercel bundles this route into the prompt's
-// function, whose instances the typing warm-up and live chats keep initialized. On its
-// own it was a separate, mostly cold function, and opening a chat paid that start.
-export const maxDuration = 800
+export const maxDuration = 300
 
 export const GET = withSessionRoute(async (_request, { id }) => {
   return Response.json(await readTranscript(id, after))
