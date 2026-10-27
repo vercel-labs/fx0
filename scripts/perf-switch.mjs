@@ -63,17 +63,27 @@ const pickItem = (skip) => `(() => {
 
 // Installed before the click: timestamps on the page's performance clock.
 const instrument = `(() => {
-  const marks = window.__fx0Switch = { down: null, url: null, active: null, painted: null };
+  // active: the clicked item is the current chat (an empty chat may show while loading).
+  // content: current and no longer loading (aria-busy gone), i.e. the chat's own
+  // transcript is on screen; painted marks two frames later. Same signal on both sides.
+  const marks = window.__fx0Switch = { down: null, url: null, active: null, activePainted: null, content: null, painted: null };
   addEventListener('pointerdown', () => { marks.down ??= performance.now() }, { capture: true, once: true });
   const push = history.pushState;
   history.pushState = function (...args) { marks.url ??= performance.now(); return push.apply(this, args) };
   const target = document.querySelector('[data-perf-target]');
-  new MutationObserver((_, observer) => {
-    if (target.getAttribute('aria-current') !== 'page') return;
-    marks.active ??= performance.now();
+  const check = (observer) => {
+    if (marks.down == null || target.getAttribute('aria-current') !== 'page') return;
+    if (marks.active == null) {
+      marks.active = performance.now();
+      requestAnimationFrame(() => requestAnimationFrame(() => { marks.activePainted ??= performance.now() }));
+    }
+    if (target.getAttribute('aria-busy') === 'true') return;
+    marks.content = performance.now();
     requestAnimationFrame(() => requestAnimationFrame(() => { marks.painted ??= performance.now() }));
     observer.disconnect();
-  }).observe(target, { attributes: true, attributeFilter: ['aria-current'] });
+  };
+  const observer = new MutationObserver(() => check(observer));
+  observer.observe(target, { attributes: true, attributeFilter: ['aria-current', 'aria-busy'] });
   return true;
 })()`
 
@@ -106,16 +116,18 @@ async function sample(options, index) {
     await delay(options.hoverMs)
     await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1 })
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1 })
-    await waitFor(cdp, 'window.__fx0Switch?.painted != null', 20000, 'chat shown')
-    // A design chat presents its preview; give it time, then read whatever happened.
-    await waitFor(cdp, `(() => { const s = ${collect}; return s.presented != null || !s.hasFrame })()`, 20000, 'preview presented').catch(() => {})
+    await waitFor(cdp, 'window.__fx0Switch?.painted != null', 20000, 'chat content shown')
+    // A design chat then presents its preview; a chat without a design times out here
+    // and is reported with hasPreview false.
+    await waitFor(cdp, `${collect}.presented != null`, 15000, 'preview presented').catch(() => {})
     await delay(300)
     const raw = await cdp.evaluate(collect)
     const down = raw.marks.down
     const rel = value => (value == null || down == null ? null : ms(value - down))
     return {
       index, hoverMs: options.hoverMs,
-      clickToUrl: rel(raw.marks.url), clickToActive: rel(raw.marks.active), clickToPainted: rel(raw.marks.painted),
+      clickToUrl: rel(raw.marks.url), clickToActive: rel(raw.marks.active), clickToActivePainted: rel(raw.marks.activePainted),
+      clickToContent: rel(raw.marks.content), clickToPainted: rel(raw.marks.painted),
       clickToPreview: rel(raw.presented), hasPreview: raw.hasFrame,
       // Resource timings relative to the click; a negative start means the hover prefetch began it.
       session: raw.session && { start: rel(raw.session.start), ttfb: rel(raw.session.ttfb), end: rel(raw.session.end) },
@@ -132,7 +144,7 @@ export async function main(args = process.argv.slice(2)) {
     try {
       const result = await sample(options, index)
       results.push(result)
-      console.log(`${options.label} #${index}: url ${result.clickToUrl} ms, chat painted ${result.clickToPainted} ms, preview ${result.clickToPreview} ms, /api/session ${result.session?.start}..${result.session?.end} ms`)
+      console.log(`${options.label} #${index}: url ${result.clickToUrl} ms, chat shown ${result.clickToActivePainted} ms, content ${result.clickToPainted} ms, preview ${result.clickToPreview} ms, /api/session ${result.session?.start}..${result.session?.end} ms`)
     } catch (error) {
       console.error(`${options.label} #${index} failed: ${error.message}`)
       results.push({ index, failed: true })

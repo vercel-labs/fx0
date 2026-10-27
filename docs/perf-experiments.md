@@ -283,6 +283,30 @@ Vercel keeps started-but-uninitialized Node processes, and routes prompts to the
 3. Put `/api/session` GET in a warm function group (same `maxDuration` grouping lesson as Experiment 3). Removes the ~0.6–0.9 s cold case.
 4. Serve the capture runtime as a cached, same-origin static script instead of inlining 97 KB per frame. Security-sensitive (frame CSP and sandbox), so last.
 
+## Experiment 6: open a history chat at once (A) and move /api/session (C)
+
+**Change** (branch `esteban/fx0-perf-instant-switch`, commit `b977b06`):
+
+- A: `switchSession` pushes the URL and shows the existing `html.chat-url` empty chat (skeletons) in the click itself, and highlights the clicked item at once. A later click wins; a stale response is dropped. A failed load returns to a new chat with the usual notice. Typing while a chat opens warms that chat instead of reserving a draft.
+- C: `/api/session` uses `maxDuration = 800` (the prompt's function).
+- A UI test covers the four behaviors. It fails on the current code at "the URL names the chat in the click itself", and fails when the typing guard is removed (checked by mutation).
+
+**Measurement fix.** The first run compared different moments: "chat painted" on the candidate was the empty chat, and the preview was read before it existed. The script now records the clicked item becoming current (the empty chat or the content) and, separately, current and no longer loading (`aria-busy` gone, i.e. the content). It waits for the preview after the content.
+
+**Result** (12 samples per side, interleaved in 2 rounds of 6, lab `~/.fx0-perf-labs/switch-ab`), medians from the click:
+
+| Metric | Baseline | Candidate |
+| --- | ---: | ---: |
+| URL changes | 78 ms (max 362; 3035 in a cold case earlier) | **0.3 ms** (all < 1 ms) |
+| Chat shown (empty or content) | 102 ms | **13 ms** (max 35) |
+| Chat content | 102 ms | 170 ms |
+| Preview presented | 620 ms | 709 ms |
+| `/api/session` ends | 78 ms | 142 ms |
+
+**Decision.** A does what the report asked: the URL and the chat move in the click itself, every time. Ship A.
+
+C made content and preview later in this test. `/api/session` was slower on the candidate, with two cold cases (1.4 s and 2.5 s): in the prompt's function it landed on instances no prompt had used on that fresh deploy, while the baseline's own function was already warm. Drop C from the change. A better candidate to test separately: the 30 s group (`teams`, `credits`), which every page load calls and therefore keeps warm when a person opens the history. This needs a check that the route's `DELETE` fits in 30 s.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |
