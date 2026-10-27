@@ -69,6 +69,18 @@ const NETWORK_SCENARIO = `
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   await runRequestTrace(new Request('http://localhost/api/prompt', { headers: { 'x-fx0-trace': ${JSON.stringify(TRACE_ID)} } }), async () => {
     await (await fetch('http://127.0.0.1:' + server.address().port + '/private/path?token=secret-token')).text();
+    // A second request reuses the kept-alive connection: no new connect span. undici returns
+    // the socket to its pool a tick after the body ends.
+    await new Promise(resolve => setImmediate(resolve));
+    await (await fetch('http://127.0.0.1:' + server.address().port + '/private/path?token=secret-token')).text();
+    // As undici does: connected/connectError carry a copy of connectParams and the same connector.
+    const connector = () => {};
+    const params = { protocol: 'https:', hostname: 'iad1.vercel-queue.com', port: '' };
+    diagnostics.channel('undici:client:beforeConnect').publish({ connectParams: params, connector });
+    diagnostics.channel('undici:client:connected').publish({ connectParams: { ...params }, connector, socket: {} });
+    const refused = { protocol: 'https:', hostname: 'secret-token.upstash.io', port: '' };
+    diagnostics.channel('undici:client:beforeConnect').publish({ connectParams: refused, connector });
+    diagnostics.channel('undici:client:connectError').publish({ connectParams: { ...refused }, connector, error: new Error('secret-token') });
     const request = { origin: 'https://api.vercel.com', path: '/v1/workflow/runs?token=secret-token' };
     diagnostics.channel('undici:request:create').publish({ request });
     diagnostics.channel('undici:request:headers').publish({ request, response: { statusCode: 201 } });
@@ -97,6 +109,11 @@ test('network spans record only a category, status and timing for every undici r
   assert.equal(byName['net.other'].args.status, 200, 'a real fetch through undici is observed')
   assert.equal(byName['net.workflow'].args.status, 201)
   assert.equal(byName['net.queue'].args.failed, true)
+  const connects = local.snapshot.traceEvents.filter(event => event.name.startsWith('connect.'))
+  assert.deepEqual(connects.map(event => event.name), ['connect.other', 'connect.queue', 'connect.redis'],
+    'one span per new connection: the kept-alive second fetch opens none')
+  assert.equal(connects[2].args.failed, true)
+  for (const event of connects) assert.equal(event.args.traceId, TRACE_ID)
   for (const event of events) {
     assert.equal(event.args.traceId, TRACE_ID, 'network spans join the request trace')
     assert.ok(event.dur >= 0)

@@ -3,6 +3,8 @@
 export type TraceName =
   | 'request.handle' | 'request.auth' | 'request.revocation' | 'request.owner' | 'prompt.activate'
   | 'net.workflow' | 'net.queue' | 'net.oidc' | 'net.vercel_api' | 'net.redis' | 'net.neon' | 'net.gateway' | 'net.other'
+  | 'connect.workflow' | 'connect.queue' | 'connect.oidc' | 'connect.vercel_api' | 'connect.redis' | 'connect.neon'
+  | 'connect.gateway' | 'connect.other'
   | 'agent.create' | 'agent.session_id'
   | 'prompt.send' | 'prompt.headers' | 'prompt.journal' | 'prompt.credential'
   | 'prompt.hydrate' | 'prompt.bind' | 'prompt.accepted' | 'prompt.assets'
@@ -22,6 +24,8 @@ export type TraceNumbers = Partial<Record<
 const names = new Set<TraceName>([
   'request.handle', 'request.auth', 'request.revocation', 'request.owner', 'prompt.activate',
   'net.workflow', 'net.queue', 'net.oidc', 'net.vercel_api', 'net.redis', 'net.neon', 'net.gateway', 'net.other',
+  'connect.workflow', 'connect.queue', 'connect.oidc', 'connect.vercel_api', 'connect.redis', 'connect.neon',
+  'connect.gateway', 'connect.other',
   'agent.create', 'agent.session_id',
   'prompt.send', 'prompt.headers', 'prompt.journal',
   'prompt.credential', 'prompt.hydrate', 'prompt.bind', 'prompt.accepted', 'prompt.assets',

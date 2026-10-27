@@ -102,6 +102,38 @@ function observeNetwork(current: TraceState): void {
     const { request } = message as { request?: object }
     if (request) finish(request, { failed: true })
   })
+  // A new connection (DNS, TCP and TLS) gets its own span inside the request that opened
+  // it, so connection setup separates from server time. Same rule: only the category.
+  // undici passes a copy of connectParams to connected/connectError but the same connector,
+  // so attempts pair by connector and destination, first in first out. The destination
+  // only pairs events; it is never recorded.
+  type ConnectMessage = { connector?: unknown; connectParams?: { protocol?: unknown; hostname?: unknown; port?: unknown } }
+  const connecting = new WeakMap<object, { destination: string; end: (attrs?: TraceNumbers) => void }[]>()
+  const destination = (params: NonNullable<ConnectMessage['connectParams']>) =>
+    `${String(params.protocol ?? '')}//${String(params.hostname ?? '')}:${String(params.port ?? '')}`
+  const connected = (message: unknown, attrs: TraceNumbers) => {
+    const { connector, connectParams } = message as ConnectMessage
+    if (!connector || typeof connector !== 'function' || !connectParams) return
+    const pending = connecting.get(connector)
+    const index = pending?.findIndex((attempt) => attempt.destination === destination(connectParams)) ?? -1
+    if (!pending || index < 0) return
+    const [attempt] = pending.splice(index, 1)
+    attempt.end(attrs)
+    if (serverTraceMode() === 'preview') exportPreview(current)
+  }
+  diagnostics.subscribe('undici:client:beforeConnect', (message) => {
+    const { connector, connectParams } = message as ConnectMessage
+    if (!connector || typeof connector !== 'function' || !connectParams) return
+    const category = networkCategory(`${String(connectParams.protocol ?? 'https:')}//${String(connectParams.hostname ?? '')}`, '')
+    const pending = connecting.get(connector) ?? []
+    pending.push({
+      destination: destination(connectParams),
+      end: current.recorder.start(category.replace('net.', 'connect.') as TraceName, current.context.getStore()),
+    })
+    connecting.set(connector, pending)
+  })
+  diagnostics.subscribe('undici:client:connected', (message) => connected(message, {}))
+  diagnostics.subscribe('undici:client:connectError', (message) => connected(message, { failed: true }))
 }
 
 // A preview's completed records leave as one JSON line tagged 'fx0:trace', at each span end
