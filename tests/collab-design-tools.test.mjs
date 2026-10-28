@@ -1,20 +1,21 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { setImmediate } from 'node:timers/promises'
 import { createDesignTools } from '../lib/collab/design-tools.ts'
 
 const HTML = '<!doctype html><html><head><title>Shared</title></head><body><h1>Hello team</h1><button>RSVP</button></body></html>'
 
 // The tools run alone: what they store or tell the teammate is recorded instead.
-function tools({ html = '', revision = 0, pending = [], review = true } = {}) {
+function tools({ html = '', revision = 0, pending = [], review = true, onPublish = () => {}, tellTeammate = () => {} } = {}) {
   const recorded = { text: [], published: [], activity: [], told: [] }
   const design = createDesignTools({
     html, revision, pending, review,
     hooks: {
       onText: (text) => { recorded.text.push(text) },
-      onPublish: (published) => { recorded.published.push(published) },
+      onPublish: async (published) => { await onPublish(published); recorded.published.push(published) },
       onActivity: (event) => { recorded.activity.push(event) },
     },
-    tellTeammate: async (from, channel, text) => { recorded.told.push(`${from} ${channel}: ${text}`) },
+    tellTeammate: async (from, channel, text) => { await tellTeammate(from, channel, text); recorded.told.push(`${from} ${channel}: ${text}`) },
   })
   // A failed result becomes { error }; a JSON output is parsed.
   const call = async (seat, name, toolArguments = {}) => {
@@ -45,6 +46,143 @@ test('a publish needs the current base revision and a valid page, and stores the
   assert.deepEqual(recorded.told, ['Builder notice: Builder published revision 1. Read it before relying on an earlier copy; earlier approvals no longer apply.'])
   assert.deepEqual(await call('Reviewer', 'read_design'), { html: HTML, revision: 1, pending_requests: [] })
   assert.deepEqual(await publish(HTML, 0), staleError(1))
+})
+
+test('both seats queue reads, competing publishes, review and reply behind persisted revisions', async () => {
+  const firstStarted = Promise.withResolvers()
+  const firstWrite = Promise.withResolvers()
+  const secondStarted = Promise.withResolvers()
+  const secondWrite = Promise.withResolvers()
+  const nextHtml = HTML.replace('Hello team', 'Hello everyone')
+  const { call, design, recorded } = tools({ onPublish: async (html) => {
+    const [started, write] = html === HTML ? [firstStarted, firstWrite] : [secondStarted, secondWrite]
+    started.resolve()
+    await write.promise
+  } })
+  const completed = []
+  const track = (name, promise) => promise.then((result) => { completed.push(name); return result })
+  const first = track('first', call('Builder', 'publish_design', { html: HTML, base_revision: 0 }))
+  await firstStarted.promise
+  const read = track('read', call('Reviewer', 'read_design'))
+  const stale = track('stale', call('Reviewer', 'publish_design', { html: nextHtml, base_revision: 0 }))
+  const second = track('second', call('Reviewer', 'publish_design', { html: nextHtml, base_revision: 1 }))
+  const latest = track('latest', call('Reviewer', 'read_design'))
+  const approval = track('approval', call('Reviewer', 'finish_review', { revision: 2, summary: 'Checked the latest page.' }))
+  const reply = track('reply', call('Builder', 'room_reply', { content: 'Both changes are ready.' }))
+  await setImmediate()
+  assert.deepEqual(completed, [], 'neither seat can observe or act on an uncommitted revision')
+  assert.deepEqual(recorded, { text: [], published: [], activity: [], told: [] })
+  assert.equal(design.completionError().message, 'The Builder neither replied to the room nor passed on its open requests')
+
+  firstWrite.resolve()
+  await secondStarted.promise
+  await setImmediate()
+  assert.deepEqual(completed, ['first', 'read', 'stale'])
+  assert.deepEqual(await read, { html: HTML, revision: 1, pending_requests: [] })
+  assert.deepEqual(await stale, staleError(1))
+  assert.deepEqual(recorded.published, [HTML], 'the successor write cannot overtake the first write')
+  assert.deepEqual(recorded.activity.map(({ kind, revision }) => [kind, revision]), [['publish', 1]])
+  assert.deepEqual(recorded.text, [])
+  assert.equal(design.completionError().message, 'The Reviewer did not approve revision 1')
+
+  secondWrite.resolve()
+  assert.deepEqual(await first, { published: true, revision: 1, bytes: Buffer.byteLength(HTML) })
+  assert.deepEqual(await second, { published: true, revision: 2, bytes: Buffer.byteLength(nextHtml) })
+  assert.deepEqual(await latest, { html: nextHtml, revision: 2, pending_requests: [] })
+  assert.deepEqual(await approval, { approved: true, revision: 2, addressed_message_ids: [] })
+  assert.equal(await reply, 'Posted to the room.')
+  assert.deepEqual(completed, ['first', 'read', 'stale', 'second', 'latest', 'approval', 'reply'])
+  assert.deepEqual(recorded.published, [HTML, nextHtml])
+  assert.deepEqual(recorded.activity.map(({ kind, revision }) => [kind, revision]), [['publish', 1], ['publish', 2], ['review', 2]])
+  assert.deepEqual(recorded.text, ['Both changes are ready.'])
+  assert.equal(design.completionError(), undefined)
+})
+
+test('an earlier approval cannot authorize review or reply while a new publish is pending', async () => {
+  const started = Promise.withResolvers()
+  const write = Promise.withResolvers()
+  const { call, recorded } = tools({ html: HTML, revision: 1, onPublish: async () => { started.resolve(); await write.promise } })
+  await call('Reviewer', 'read_design')
+  await call('Reviewer', 'finish_review', { revision: 1, summary: 'Checked the old page.' })
+  const publish = call('Builder', 'publish_design', { html: HTML.replace('Hello team', 'Hello everyone'), base_revision: 1 })
+  await started.promise
+  let reviewed = false
+  let replied = false
+  const approval = call('Reviewer', 'finish_review', { revision: 1, summary: 'Still checked.' }).then((result) => { reviewed = true; return result })
+  const reply = call('Builder', 'room_reply', { content: 'Ready.' }).then((result) => { replied = true; return result })
+  await setImmediate()
+  assert.equal(reviewed, false)
+  assert.equal(replied, false)
+  assert.deepEqual(recorded.text, [])
+  write.resolve()
+  await publish
+  assert.deepEqual(await approval, { error: 'Revision 2 is current. Read it and review that revision.' })
+  assert.deepEqual(await reply, { error: 'Wait for the Reviewer to approve revision 2 first.' })
+  assert.deepEqual(recorded.text, [])
+})
+
+test('a failed publish rejects without a phantom revision and releases queued operations and retries', async () => {
+  const started = Promise.withResolvers()
+  const write = Promise.withResolvers()
+  const failure = new Error('Persistence failed')
+  let attempts = 0
+  const nextHtml = HTML.replace('Hello team', 'Hello everyone')
+  const { call, design, recorded } = tools({ html: HTML, revision: 1, onPublish: async () => {
+    if (++attempts === 1) { started.resolve(); await write.promise }
+  } })
+  await call('Reviewer', 'read_design')
+  await call('Reviewer', 'finish_review', { revision: 1, summary: 'Checked the saved page.' })
+  const publish = call('Builder', 'publish_design', { html: nextHtml, base_revision: 1 })
+  const rejected = assert.rejects(publish, (error) => error === failure)
+  await started.promise
+  let readFinished = false
+  const read = call('Reviewer', 'read_design').then((result) => { readFinished = true; return result })
+  const successor = call('Reviewer', 'publish_design', { html: nextHtml, base_revision: 2 })
+  const approval = call('Reviewer', 'finish_review', { revision: 2, summary: 'Cannot approve an unsaved page.' })
+  const reply = call('Builder', 'room_reply', { content: 'The saved page is ready.' })
+  await setImmediate()
+  assert.equal(readFinished, false)
+  assert.deepEqual(recorded.published, [])
+  assert.deepEqual(recorded.text, [])
+  assert.equal(design.completionError().message, 'The Builder neither replied to the room nor passed on its open requests')
+  write.reject(failure)
+  await rejected
+  assert.deepEqual(await read, { html: HTML, revision: 1, pending_requests: [] })
+  assert.deepEqual(await successor, staleError(1))
+  assert.deepEqual(await approval, { error: 'Revision 1 is current. Read it and review that revision.' })
+  assert.equal(await reply, 'Posted to the room.', 'the committed revision retains its approval')
+  assert.equal(attempts, 1, 'a successor based on the failed revision never reaches persistence')
+  assert.deepEqual(recorded.published, [])
+  assert.deepEqual(recorded.activity.map(({ kind, revision }) => [kind, revision]), [['review', 1]])
+  assert.deepEqual(recorded.told, ['Reviewer notice: Reviewer approved revision 1. Notes: Checked the saved page.'])
+  assert.equal(design.completionError(), undefined)
+
+  assert.deepEqual(await call('Builder', 'publish_design', { html: nextHtml, base_revision: 1 }), { published: true, revision: 2, bytes: Buffer.byteLength(nextHtml) })
+  assert.deepEqual(recorded.published, [nextHtml])
+  assert.deepEqual(await call('Builder', 'read_design'), { html: nextHtml, revision: 2, pending_requests: [] })
+  assert.equal(design.completionError().message, 'The Reviewer did not approve revision 2')
+})
+
+test('teammate transport can enqueue the other seat without waiting for its tools', async () => {
+  const posted = Promise.withResolvers()
+  const accepted = Promise.withResolvers()
+  let queuedRead
+  let readFinished = false
+  const { call, recorded } = tools({ tellTeammate: async () => {
+    queuedRead = call('Reviewer', 'read_design').then((result) => { readFinished = true; return result })
+    posted.resolve()
+    await accepted.promise
+  } })
+  const send = call('Builder', 'send_message', { content: 'Check the page.' })
+  await posted.promise
+  await setImmediate()
+  assert.equal(readFinished, false)
+  assert.deepEqual(recorded.activity, [])
+  // Transport acceptance does not depend on the recipient's read completing.
+  accepted.resolve()
+  assert.equal(await send, 'Sent to Reviewer.')
+  assert.deepEqual(await queuedRead, { html: '', revision: 0, pending_requests: [] })
+  assert.deepEqual(recorded.activity, [{ agent: 'Builder', kind: 'message', text: 'Check the page.' }])
 })
 
 test('the review gate follows the exact current revision', async () => {

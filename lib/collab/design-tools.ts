@@ -9,11 +9,11 @@ import { isBoundedText, teammateOf, type AgentActivity, type AgentSeat, type Mes
 type DesignActivity = Omit<AgentActivity, 'id' | 'createdAt'>
 type TeammateChannel = Extract<MessageMetadata['channel'], 'team' | 'notice'>
 
-// Synchronous, like the SQLite store behind them, so tool state never waits on a half-finished write.
+// Awaited before tool state moves on, so it never runs ahead of a half-finished write.
 export interface DesignHooks {
-  onText(text: string): void
-  onPublish(html: string): void
-  onActivity(activity: DesignActivity): void
+  onText(text: string): void | Promise<void>
+  onPublish(html: string): void | Promise<void>
+  onActivity(activity: DesignActivity): void | Promise<void>
 }
 
 interface DesignToolsOptions {
@@ -44,6 +44,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 /** One run's shared page, the review gate on it, and the model tools that reach them. */
 export function createDesignTools({ html, revision, review, pending = [], hooks, tellTeammate }: DesignToolsOptions): DesignTools {
   let artifact = { html, revision }
+  let toolTail: Promise<void> = Promise.resolve()
   let approvedRevision: number | null = null
   let repliedRevision: number | null = null
   let builderPassed = false
@@ -70,28 +71,28 @@ export function createDesignTools({ html, revision, review, pending = [], hooks,
     if (typeof toolArguments.html !== 'string') return failed('publish_design needs the complete HTML document as text')
     const validation = validateDesignArtifactHtml(toolArguments.html, { remoteImages: false })
     if (!validation.ok) return failed(validation.error)
-    hooks.onPublish(validation.html)
+    await hooks.onPublish(validation.html)
     artifact = { html: validation.html, revision: artifact.revision + 1 }
     const published = artifact.revision
-    hooks.onActivity({ agent: seat, kind: 'publish', text: 'Published the shared design', revision: published })
+    await hooks.onActivity({ agent: seat, kind: 'publish', text: 'Published the shared design', revision: published })
     if (review) await tellTeammate(seat, 'notice', publishedNotice(seat, published))
     return succeeded(JSON.stringify({ published: true, revision: published, bytes: validation.bytes }))
   }
   const sendMessage: Tool = async (seat, toolArguments) => {
     if (!isBoundedText(toolArguments.content, MAX_TEAM_MESSAGE_LENGTH)) return failed(`send_message needs 1–${MAX_TEAM_MESSAGE_LENGTH} characters of content`)
     await tellTeammate(seat, 'team', toolArguments.content)
-    hooks.onActivity({ agent: seat, kind: 'message', text: toolArguments.content })
+    await hooks.onActivity({ agent: seat, kind: 'message', text: toolArguments.content })
     return succeeded(`Sent to ${teammateOf(seat)}.`)
   }
-  const roomReply: Tool = (_seat, toolArguments) => {
+  const roomReply: Tool = async (_seat, toolArguments) => {
     if (!isBoundedText(toolArguments.content, MAX_ROOM_REPLY_LENGTH)) return failed(`room_reply needs 1–${MAX_ROOM_REPLY_LENGTH} characters of content`)
     const uncovered = coverageError(toolArguments.addressed_message_ids)
     if (uncovered) return failed(uncovered)
     if (requests.length && readRevisions.Builder === undefined) return failed('Read the design and every pending_request with read_design before replying.')
     if (review && artifact.html && approvedRevision !== artifact.revision) return failed(`Wait for the Reviewer to approve revision ${artifact.revision} first.`)
     if (repliedRevision === artifact.revision) return succeeded('Already posted the reply for this revision and open requests.')
-    hooks.onText(toolArguments.content)
     repliedRevision = artifact.revision
+    await hooks.onText(toolArguments.content)
     return succeeded('Posted to the room.')
   }
   const finishReview: Tool = async (seat, toolArguments) => {
@@ -105,7 +106,7 @@ export function createDesignTools({ html, revision, review, pending = [], hooks,
     // A repeated approval of the same revision is accepted without a second notice or a second Builder reply.
     if (approvedRevision !== current) {
       approvedRevision = current
-      hooks.onActivity({ agent: seat, kind: 'review', text: toolArguments.summary, revision: current })
+      await hooks.onActivity({ agent: seat, kind: 'review', text: toolArguments.summary, revision: current })
       await tellTeammate(seat, 'notice', approvedNotice(current, toolArguments.summary.trim()))
     }
     return succeeded(JSON.stringify({ approved: true, revision: current, addressed_message_ids: [...requestIds] }))
@@ -125,7 +126,11 @@ export function createDesignTools({ html, revision, review, pending = [], hooks,
       const tool = seatTools(seat, review).find((definition) => definition.name === name)
       if (!tool) return failed(`${name} is not one of your tools`)
       if (!isRecord(toolArguments)) return failed('Tool arguments must be a JSON object')
-      return handlers[tool.name](seat, toolArguments)
+      // Both seats share this tail. Teammate delivery awaits transport, not the recipient's tools.
+      const result = toolTail.then(() => handlers[tool.name](seat, toolArguments))
+      // Keep the caller's rejection, but don't let a failed operation strand later calls.
+      toolTail = result.then(() => {}, () => {})
+      return result
     },
     // A batch that leaves the page alone settles with a reply or the Builder's pass; a change must also be approved and announced.
     completionError() {

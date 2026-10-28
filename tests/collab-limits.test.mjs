@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clientAddress, collabLimits, HourlyCounter } from '../lib/collab/limits.ts'
+import { clientAddress, collabLimits, HOURLY_MESSAGE_LIMIT_MESSAGE } from '../lib/collab/limits.ts'
+import { createRoomsDatabase, storeOn } from './fixtures/rooms-db.mjs'
 
 const HOUR = 60 * 60 * 1000
-const request = (forwardedFor) => new Request('https://demo.example/api/collab', forwardedFor === undefined ? {} : { headers: { 'x-forwarded-for': forwardedFor } })
+const request = (forwardedFor) => new Request('https://demo.example/api/ampersand', forwardedFor === undefined ? {} : { headers: { 'x-forwarded-for': forwardedFor } })
 
 test('limits are off by default, parse whole numbers and refuse anything else', () => {
   assert.deepEqual(collabLimits({}), {
@@ -36,21 +37,40 @@ test('the client address is the entry the trusted proxies received, and a header
   assert.deepEqual(log.mock.calls.map((call) => call.arguments[1]), [{ entries: 1, trustedProxies: 1 }, { entries: 0, trustedProxies: 1 }])
 })
 
-test('the hourly counter checks every use against its own limit, counts only when told, and starts over each hour', () => {
-  const counter = new HourlyCounter()
-  const now = 5 * HOUR + 10
+test('message admission reserves every hourly key atomically, deduplicates and forgets prior hours', async (t) => {
+  const db = await createRoomsDatabase()
+  t.after(() => db.close())
+  const store = storeOn(db)
+  for (const method of ['takeRunUnit', 'hourlyAllows', 'hourlyAdd']) assert.equal(method in store, false)
+  const now = Date.now(), hour = Math.floor(now / HOUR)
+  t.mock.method(Date, 'now', () => now)
+  const token = 'a'.repeat(43)
+  const { room } = await store.createRoom({ name: 'Alice', title: 'Limits', token })
   const uses = (browser, address) => [{ key: `browser:${browser}`, limit: 2 }, { key: `address:${address}`, limit: 3 }]
   const single = [{ key: 'browser:once', limit: 1 }]
-  for (let check = 0; check < 3; check++) assert.equal(counter.allows(single, now), true, 'checking counts nothing')
-  counter.add(single, now)
-  assert.equal(counter.allows(single, now), false)
-  counter.add(uses('a', 'x'), now)
-  counter.add(uses('b', 'x'), now)
-  counter.add(uses('c', 'x'), now)
-  assert.equal(counter.allows(uses('d', 'x'), now), false, 'the shared address is at its own limit of 3')
-  assert.equal(counter.allows(uses('d', 'y'), now), true)
-  counter.add(uses('a', 'y'), now)
-  assert.equal(counter.allows(uses('a', 'z'), now), false, 'browser a is at its limit of 2')
-  assert.equal(counter.allows([], now), true)
-  assert.equal(counter.allows(uses('a', 'x'), 6 * HOUR), true, 'a new hour starts over')
+  const append = (requestId, hourlyUses) => store.appendMessage(room.id, token, { text: 'Build this', requestId, dailyLimit: null, hourlyUses })
+  const counters = async () => (await db.query('SELECT key, hour, count FROM ampersand_hourly ORDER BY key')).rows
+  assert.equal((await append('once', single)).inserted, true)
+  for (let repeat = 0; repeat < 3; repeat++) assert.equal((await append('once', single)).inserted, false)
+  assert.deepEqual(await counters(), [{ key: 'browser:once', hour, count: 1 }])
+  await assert.rejects(append('too-many', single), { message: HOURLY_MESSAGE_LIMIT_MESSAGE })
+  await append('a-x', uses('a', 'x'))
+  await append('b-x', uses('b', 'x'))
+  await append('c-x', uses('c', 'x'))
+  const before = await counters()
+  await assert.rejects(append('d-x', uses('d', 'x')), { message: HOURLY_MESSAGE_LIMIT_MESSAGE })
+  assert.deepEqual(await counters(), before, 'a full shared address consumes no browser reservation')
+  await append('d-y', uses('d', 'y'))
+  await append('a-y', uses('a', 'y'))
+  const after = await counters()
+  await assert.rejects(append('a-z', uses('a', 'z')), { message: HOURLY_MESSAGE_LIMIT_MESSAGE })
+  assert.deepEqual(await counters(), after, 'a full browser consumes no address reservation')
+  await append('unlimited', [])
+  assert.deepEqual(await counters(), after)
+  // Advance persisted counters to the previous hour rather than bypassing admission with a test-only counter API.
+  await db.query('UPDATE ampersand_hourly SET hour = $1', [hour - 1])
+  await append('next-hour', uses('a', 'x'))
+  await append('once-next-hour', single)
+  assert.deepEqual((await db.query('SELECT DISTINCT hour FROM ampersand_hourly')).rows, [{ hour }])
+  assert.ok((await counters()).every((row) => row.count === 1))
 })

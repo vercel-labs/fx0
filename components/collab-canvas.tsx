@@ -1,7 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { RoomSnapshot } from '../lib/collab/types'
+import { designLinkUrl } from '../lib/design-link'
+import DesignLinkDialog from './design-link-dialog'
 import { readRevisionSource } from './collab-api'
 import { SPINNER, TEXT_BUTTON } from './collab-classes'
 import { clockTime } from './collab-state'
@@ -73,12 +75,10 @@ function CanvasView({ room, onBack }: { room: RoomSnapshot | null; onBack: () =>
       </div>
       {revision && room ? (
         view === 'preview' ? (
-          <iframe
+          <PublishedPreview
             key={`${room.id}-${revision.id}`}
-            src={`/api/collab/artifact?room=${encodeURIComponent(room.id)}&revision=${revision.id}`}
-            sandbox="allow-scripts"
+            src={`/api/ampersand/artifact?room=${encodeURIComponent(room.id)}&revision=${revision.id}`}
             title={`${room.title} — version ${revisionNumber}`}
-            className="block min-h-0 w-full flex-1 bg-white"
           />
         ) : (
           <RevisionSource roomId={room.id} revisionId={revision.id} label={`HTML source for version ${revisionNumber}`} />
@@ -104,6 +104,36 @@ function CanvasView({ room, onBack }: { room: RoomSnapshot | null; onBack: () =>
           )}
         </div>
       )}
+    </>
+  )
+}
+
+// Keyed by room/revision and unmounted in source view, so link requests never outlive their iframe.
+function PublishedPreview({ src, title }: { src: string; title: string }) {
+  const frame = useRef<HTMLIFrameElement>(null)
+  const [linkRequest, setLinkRequest] = useState<string | null>(null)
+  const linksPausedUntil = useRef(0)
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (!frame.current?.contentWindow || event.source !== frame.current.contentWindow) return
+      const data = event.data
+      if (!data || typeof data !== 'object' || data.type !== 'open') return
+      // This opaque-origin iframe's server-generated token is unknown to the parent.
+      // Its window identifies the sender; even valid requests still need confirmation.
+      const url = designLinkUrl(data.url)
+      if (!url || Date.now() < linksPausedUntil.current) return
+      setLinkRequest((current) => current ?? url)
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
+  return (
+    <>
+      <iframe ref={frame} src={src} sandbox="allow-scripts" title={title} className="block min-h-0 w-full flex-1 bg-white" />
+      <DesignLinkDialog url={linkRequest} onClose={() => {
+        linksPausedUntil.current = Date.now() + 1000
+        setLinkRequest(null)
+      }} />
     </>
   )
 }

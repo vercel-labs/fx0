@@ -40,9 +40,9 @@ export interface DesignGroupRoom {
 }
 
 export interface DesignGroupHooks extends DesignHooks {
-  onSession(seat: AgentSeat, session: SeatSession): void
+  onSession(seat: AgentSeat, session: SeatSession): void | Promise<void>
   /** Checks the durable input watermark before an external message or visible effect. */
-  assertCurrent?(): void
+  assertCurrent?(): void | Promise<void>
 }
 
 export interface DesignGroupRun {
@@ -153,12 +153,15 @@ export async function runDesignGroup({ client, model, room, hooks, timeoutMs = D
   const post = (seat: Seat, events: AgentSessionInputParam[], keyParts: string[]) => postEvents(client, seat.sessionId, events, idempotencyKey(keyParts), signal)
 
   // Marks the seat busy before the post, so neither an idle check nor the end of the run can slip in between.
+  // The input check is awaited inside the tracked post, so an idle check that starts meanwhile still waits for it.
   const send = async (seat: Seat, input: InputMessage[]) => {
-    hooks.assertCurrent?.()
-    signal.throwIfAborted()
     seat.busy = true
     seat.postCount++
-    const sent = post(seat, [{ type: 'agent.session.input.message', input }], [seat.sessionId, ...input.map((message) => message.metadata.id)])
+    const sent = (async () => {
+      await hooks.assertCurrent?.()
+      signal.throwIfAborted()
+      await post(seat, [{ type: 'agent.session.input.message', input }], [seat.sessionId, ...input.map((message) => message.metadata.id)])
+    })()
     seat.posts.add(sent)
     try {
       await sent
@@ -199,11 +202,15 @@ export async function runDesignGroup({ client, model, room, hooks, timeoutMs = D
       }
       let receipt = receipts.get(key)
       if (!receipt) {
-        hooks.assertCurrent?.()
+        await hooks.assertCurrent?.()
         signal.throwIfAborted()
-        calls.set(key, { name: action.name, arguments: structuredClone(action.arguments) })
-        receipt = design.run(seat.name, action.name, action.arguments)
-        receipts.set(key, receipt)
+        // The same request may have arrived by event and by a state read during the check.
+        receipt = receipts.get(key)
+        if (!receipt) {
+          calls.set(key, { name: action.name, arguments: structuredClone(action.arguments) })
+          receipt = design.run(seat.name, action.name, action.arguments)
+          receipts.set(key, receipt)
+        }
       }
       let resultPost = resultPosts.get(key)
       if (!resultPost) {
@@ -237,7 +244,7 @@ export async function runDesignGroup({ client, model, room, hooks, timeoutMs = D
         if (seat.sessionId) return
         seat.sessionId = event.session.id
         seat.creating = false
-        hooks.onSession(seat.name, { sessionId: seat.sessionId, deliveredThrough: room.messages.at(-1)?.id ?? 0 })
+        await hooks.onSession(seat.name, { sessionId: seat.sessionId, deliveredThrough: room.messages.at(-1)?.id ?? 0 })
         seat.ready.resolve()
         return
       case 'agent.session.requires_action':
@@ -318,7 +325,7 @@ export async function runDesignGroup({ client, model, room, hooks, timeoutMs = D
       ...fresh.map((message) => ({ at: message.createdAt, input: roomInput(message) })),
     ].sort((left, right) => left.at - right.at).map((item) => item.input)
     // Saved before the post, so a post whose outcome is unknown makes the next run start this seat over.
-    hooks.onSession(seat.name, { sessionId: seat.sessionId, deliveredThrough: fresh[fresh.length - 1].id })
+    await hooks.onSession(seat.name, { sessionId: seat.sessionId, deliveredThrough: fresh[fresh.length - 1].id })
     await send(seat, [...input, pendingNotice()])
     seat.ready.resolve()
     track(follow(seat, events))
@@ -327,7 +334,7 @@ export async function runDesignGroup({ client, model, room, hooks, timeoutMs = D
   }
 
   const startSession = async (seat: Seat, agent: AmpersandAgent, fingerprint: string) => {
-    hooks.assertCurrent?.()
+    await hooks.assertCurrent?.()
     signal.throwIfAborted()
     const setup = inputMessage(setupText(seat.name, room.title, room.members, room.review), { id: 'setup', sender: 'fx0', sender_name: 'fx0', channel: 'setup', timestamp: nowSeconds() })
     const input = [setup, ...room.messages.map(roomInput), pendingNotice()]

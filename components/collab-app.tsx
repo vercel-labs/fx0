@@ -36,6 +36,7 @@ export default function CollabApp() {
   const [title, setTitle] = useState('')
   const [incoming, setIncoming] = useState<{ id: string; invite: string } | null>(null)
   const [entryError, setEntryError] = useState('')
+  const [locationError, setLocationError] = useState('')
   const [entering, setEntering] = useState(false)
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
@@ -83,12 +84,13 @@ export default function CollabApp() {
     setInvite('')
     setInviteError('')
     setEntryError('')
+    setLocationError('')
     setActionError('')
     setConnectionError('')
     setDraft('')
     setTitle('')
     failedMessage.current = null
-    setIncoming(id ? { id, invite: secret } : null)
+    setIncoming(null)
     setMobilePane('chat')
     setMobileSidebarOpen(false)
     setStarting(Boolean(id))
@@ -102,7 +104,8 @@ export default function CollabApp() {
     } catch (error) {
       if (ticket !== navigation.current) return
       const expectedJoin = error instanceof RequestError && ([401, 403].includes(error.status) || (secret && error.status === 404))
-      if (!expectedJoin) setEntryError(errorText(error))
+      if (expectedJoin) setIncoming({ id, invite: secret })
+      else setLocationError(errorText(error))
     } finally {
       if (ticket === navigation.current) setStarting(false)
     }
@@ -174,7 +177,7 @@ export default function CollabApp() {
   }, [room?.id, acceptRoom, refreshWorkspace])
 
   function goHome() {
-    window.history.pushState(null, '', '/collab')
+    window.history.pushState(null, '', '/ampersand')
     void openLocation(new URL(window.location.href))
     void refreshWorkspace()
   }
@@ -197,7 +200,7 @@ export default function CollabApp() {
 
   async function enterRoom(event: FormEvent) {
     event.preventDefault()
-    if (entering || !name.trim()) return
+    if (starting || locationError || entering || !name.trim()) return
     const ticket = navigation.current
     setEntering(true)
     setEntryError('')
@@ -302,7 +305,7 @@ export default function CollabApp() {
       activeId={room?.id ?? ''}
       loadingId={null}
       now={now}
-      homeHref="/collab"
+      homeHref="/ampersand"
       help={false}
       onSelect={selectRoom}
       onPrefetch={() => {}}
@@ -405,7 +408,14 @@ export default function CollabApp() {
             onSend={() => void sendMessage()}
             onRetry={retry}
           />
-        ) : (
+        ) : locationError ? (
+          <div className="shrink-0 border-t border-border px-6 py-5">
+            <p role="alert" className="mb-3 text-[11px] leading-[1.7] text-error wrap-anywhere">{locationError}</p>
+            <button type="button" onClick={() => void openLocation(new URL(window.location.href))} className={TEXT_BUTTON}>
+              Try opening room again
+            </button>
+          </div>
+        ) : starting ? null : (
           <CollabEntry
             ref={entryNameRef}
             joining={Boolean(incoming)}

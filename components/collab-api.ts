@@ -1,6 +1,6 @@
 import type { RoomSnapshot, RoomSummary } from '../lib/collab/types'
 
-const ENDPOINT = '/api/collab'
+const ENDPOINT = '/api/ampersand'
 
 export interface Workspace {
   configured: boolean

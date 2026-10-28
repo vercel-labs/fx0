@@ -6,7 +6,7 @@ fx0 is also a working example of an app built on libfx. [One `createFxAgent()` c
 
 Try it at [fx0.vercel.dev](https://fx0.vercel.dev), or clone it and make it your own.
 
-[fx0 together](docs/ampersand-collab.md) is a shared-room demo built on the Ampersand Agents API. Set `AMPERSAND_API_KEY`, run `npm run dev:collab` and open `http://127.0.0.1:3025/collab`. It keeps rooms in SQLite on one Node server and doesn't need Sign in with Vercel, Neon or Redis.
+[fx0 together](docs/ampersand-collab.md) is an independent shared-room demo at `/ampersand`, built on the Ampersand Agents API. Set `AMPERSAND_API_KEY` and `DATABASE_URL`, apply only `migrations/006_ampersand_rooms.sql` as described in its setup guide, and open `/ampersand`. The demo doesn't need Sign in with Vercel. Normal fx0 needs no Ampersand configuration.
 
 ## Features
 
@@ -174,6 +174,7 @@ npm run test:auth
 npm run test:collab
 npm run build
 npm run test:smoke                # runs the production build with fake sessions
+npm run test:normal:isolation     # production guest page/APIs without service configuration
 npm run test:journal:integration  # needs KV_REST_API_URL/TOKEN, writes under its own prefix
 npm run test:trial:integration    # needs local redis-server/redis-cli; no remote services
 npm run test:artifact:browser     # needs local Chrome (or CHROME_PATH); checks design CSP enforcement

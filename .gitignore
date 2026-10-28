@@ -6,4 +6,3 @@ node_modules/
 .vercel
 .env*
 tsconfig.tsbuildinfo
-.collab-data/

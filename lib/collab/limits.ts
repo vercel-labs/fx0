@@ -34,8 +34,6 @@ export const HOURLY_MESSAGE_LIMIT_MESSAGE = 'Too many messages were sent from he
 export const HOURLY_ROOM_LIMIT_MESSAGE = 'Too many rooms were opened from your network this hour. Please try again later.'
 export const ROOM_FULL_MESSAGE = 'This room is full.'
 
-const HOUR_MS = 60 * 60 * 1000
-
 function whole(env: NodeJS.ProcessEnv, name: string, minimum: number): number | null {
   const value = env[name]
   if (value === undefined || value === '') return null
@@ -73,29 +71,4 @@ export function clientAddress(request: Request, trustedProxies: number): string 
     throw new Error('Client address unavailable')
   }
   return address
-}
-
-/** Fixed hourly windows in memory, cleared each hour: one process serves every room, and a restart forgets only the current hour. */
-export class HourlyCounter {
-  #hour = 0
-  #counts = new Map<string, number>()
-
-  #roll(now: number): void {
-    const hour = Math.floor(now / HOUR_MS)
-    if (hour === this.#hour) return
-    this.#hour = hour
-    this.#counts.clear()
-  }
-
-  /** Whether every use is still under its limit this hour. */
-  allows(uses: HourlyUse[], now = Date.now()): boolean {
-    this.#roll(now)
-    return uses.every((use) => (this.#counts.get(use.key) ?? 0) < use.limit)
-  }
-
-  /** Counts one use of each key. */
-  add(uses: HourlyUse[], now = Date.now()): void {
-    this.#roll(now)
-    for (const use of uses) this.#counts.set(use.key, (this.#counts.get(use.key) ?? 0) + 1)
-  }
 }

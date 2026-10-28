@@ -9,7 +9,7 @@ const artifact = withCollabRoute(async (request) => {
   const params = new URL(request.url).searchParams
   const id = params.get('room')
   if (!id) throw new AuthError(404, 'Design not found')
-  const source = collabRuntime().store.revisionHtml(id, requireBrowserToken(request), revisionId(params.get('revision')))
+  const source = await collabRuntime().store.revisionHtml(id, requireBrowserToken(request), revisionId(params.get('revision')))
   const html = prepareDesignArtifactHtml(source, DESIGN_ARTIFACT_EMBEDDED_CSP, crypto.randomUUID())
   if (!html) throw new AuthError(422, 'Invalid design')
   return new Response(html, {

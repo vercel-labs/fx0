@@ -18,12 +18,12 @@ test('member labels name the viewer', () => {
 })
 
 test('invite links carry the room in the query and the invite only in the fragment', (t) => {
-  browserAt(t, 'https://fx0.test/collab?room=old&view=chat#invite=stale')
-  assert.equal(roomUrl('room 1').toString(), 'https://fx0.test/collab?room=room+1')
+  browserAt(t, 'https://fx0.test/ampersand?room=old&view=chat#invite=stale')
+  assert.equal(roomUrl('room 1').toString(), 'https://fx0.test/ampersand?room=room+1')
   const link = inviteLink('room 1', 'a+b/c')
-  assert.equal(link, 'https://fx0.test/collab?room=room+1#invite=a%2Bb%2Fc')
+  assert.equal(link, 'https://fx0.test/ampersand?room=room+1#invite=a%2Bb%2Fc')
   assert.deepEqual(readInviteLink(new URL(link)), { roomId: 'room 1', invite: 'a+b/c' })
-  assert.deepEqual(readInviteLink(new URL('https://fx0.test/collab')), { roomId: null, invite: '' })
+  assert.deepEqual(readInviteLink(new URL('https://fx0.test/ampersand')), { roomId: null, invite: '' })
 })
 
 test('reads use GET, room actions post their JSON body and nothing uses the HTTP cache', async (t) => {
@@ -37,12 +37,12 @@ test('reads use GET, room actions post their JSON body and nothing uses the HTTP
   await postRoom({ action: 'message', id: 'a', text: 'Hi', requestId: 'r1' })
   await postRoom({ action: 'retry', id: 'a' })
   assert.deepEqual(await postRoom({ action: 'invite', id: 'a' }), { ok: true })
-  const post = (body) => ['/api/collab', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, cache: 'no-store' }]
+  const post = (body) => ['/api/ampersand', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, cache: 'no-store' }]
   assert.deepEqual(fetch.mock.calls.map((call) => call.arguments), [
-    ['/api/collab', { method: 'GET', cache: 'no-store' }],
-    ['/api/collab?room=a+b', { method: 'GET', cache: 'no-store' }],
-    ['/api/collab?room=a+b&since=7', { method: 'GET', cache: 'no-store' }],
-    ['/api/collab?room=a+b&revision=3', { method: 'GET', cache: 'no-store' }],
+    ['/api/ampersand', { method: 'GET', cache: 'no-store' }],
+    ['/api/ampersand?room=a+b', { method: 'GET', cache: 'no-store' }],
+    ['/api/ampersand?room=a+b&since=7', { method: 'GET', cache: 'no-store' }],
+    ['/api/ampersand?room=a+b&revision=3', { method: 'GET', cache: 'no-store' }],
     post('{"action":"create","name":"Ada","title":"Launch"}'),
     post('{"action":"join","id":"a","invite":"secret","name":"Bo"}'),
     post('{"action":"message","id":"a","text":"Hi","requestId":"r1"}'),

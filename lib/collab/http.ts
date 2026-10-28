@@ -8,9 +8,9 @@ const IDENTITY_TTL_SECONDS = 7 * 24 * 60 * 60
 
 type CollabHandler = (request: Request) => Response | Promise<Response>
 
-// An explicit public origin also works behind a local HTTPS reverse proxy.
-function collabOrigin(): string {
-  return new URL(process.env.FX0_COLLAB_ORIGIN ?? 'http://127.0.0.1:3025').origin
+// The deployment's own origin; an explicit public origin also works behind a reverse proxy.
+function collabOrigin(request: Request): string {
+  return new URL(process.env.FX0_COLLAB_ORIGIN || request.url).origin
 }
 
 export function browserToken(request: Request): string | null {
@@ -29,10 +29,10 @@ export function privateJson(value: unknown, status = 200, headers: Record<string
   return Response.json(value, { status, headers: { ...headers, 'cache-control': 'private, no-store', 'referrer-policy': 'no-referrer' } })
 }
 
-export function identityCookie(token: string): string {
+export function identityCookie(token: string, request: Request): string {
   return [
     `${COLLAB_COOKIE}=${token}`, 'Path=/', 'HttpOnly', 'SameSite=Strict', `Max-Age=${IDENTITY_TTL_SECONDS}`,
-    ...(new URL(collabOrigin()).protocol === 'https:' ? ['Secure'] : []),
+    ...(new URL(collabOrigin(request)).protocol === 'https:' ? ['Secure'] : []),
   ].join('; ')
 }
 
@@ -46,8 +46,8 @@ function collabFailure(error: unknown): Response {
 export function withCollabRoute(body: CollabHandler) {
   return async (request: Request): Promise<Response> => {
     try {
-      // Not fx0's assertSameOrigin: it requires HTTPS in production, and this local demo also runs `next start` over HTTP.
-      if (request.method !== 'GET' && request.method !== 'HEAD' && request.headers.get('origin') !== collabOrigin()) {
+      // Not fx0's assertSameOrigin: it requires HTTPS in production, and the demo also runs locally over HTTP.
+      if (request.method !== 'GET' && request.method !== 'HEAD' && request.headers.get('origin') !== collabOrigin(request)) {
         throw new AuthError(403, 'Open the demo in the same browser origin.')
       }
       return await body(request)
