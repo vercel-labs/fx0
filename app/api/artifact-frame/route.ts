@@ -1,7 +1,9 @@
 import { ARTIFACT_IMAGE_PATH, artifactImageSrc } from '../../../lib/artifact-image'
 import { DESIGN_ARTIFACT_EMBEDDED_CSP, designFrameCsp, designFrameHtml, normalizeDesignArtifactHtml, prepareDesignArtifactHtml, remoteImagesEnabled } from '../../../lib/design-artifact'
 import { DESIGN_CAPTURE_RELAY, designCaptureScript } from '../../../lib/design-capture'
+import { embedGoogleFonts } from '../../../lib/google-fonts'
 import { PREVIEW_PROTOCOL, type PreviewPayload } from '../../../lib/preview-update'
+import { cachedGoogleFontCss } from '../../../lib/remote-image-cache'
 import { markRemoteImages } from '../../../lib/remote-image'
 import { readDesignArtifactAt } from '../../../lib/journal'
 import { readGeneration } from '../../../lib/history'
@@ -46,6 +48,13 @@ const serveFrame = withSessionRoute(async (request, { id: sessionId, user }) => 
   const marked = artifact != null
     ? markRemoteImages(artifact, crypto.randomUUID().replaceAll('-', ''), { remote: remoteImagesEnabled() })
     : { html: artifact, images: [] }
+  // Google Fonts are embedded here, from the shared cache (lib/google-fonts.ts).
+  if (marked.html != null && remoteImagesEnabled()) {
+    marked.html = await embedGoogleFonts(marked.html, (url) => cachedGoogleFontCss(url).catch((error: Error) => {
+      log(sessionId, 'artifact-font:failed', { reason: error.message.slice(0, 80) })
+      throw error
+    }))
+  }
   const images = marked.images.map(({ marker, url }) => ({ marker, src: artifactImageSrc(sessionId, url) }))
   const prepared = marked.html == null ? null : prepareDesignArtifactHtml(marked.html, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken)
   // Every stored design passed validation, so this only guards against one that

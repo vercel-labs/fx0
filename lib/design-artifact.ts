@@ -1,5 +1,5 @@
 // @ts-expect-error Node strip-types tests require the source extension.
-import { previewUpdateRuntime, type PreviewPayload } from './preview-update.ts'
+import { MAX_RENDER_HTML_LENGTH, previewUpdateRuntime, type PreviewPayload } from './preview-update.ts'
 
 export const MAX_DESIGN_ARTIFACT_BYTES = 512 * 1024
 export const MAX_REMOTE_IMAGE_URL_LENGTH = 2048
@@ -28,8 +28,19 @@ export function assetReference(value: string): string | null {
   return ASSET_REFERENCE.test(value) ? value : null
 }
 
+// Google Fonts, the one remote stylesheet a design may name. Like a remote image it is
+// fetched and embedded before the design runs (lib/google-fonts.ts); it is never an image.
+export const MAX_FONT_STYLESHEETS = 4
+// It must name a family: an unquoted href ends at its first "=" in fx0's parser.
+const GOOGLE_FONTS_STYLESHEET = /^https:\/\/fonts\.googleapis\.com\/css2?\?(?:[^\s"'<>()\\]*&)?family=[^\s"'<>()\\]+$/
+const GOOGLE_FONTS_ORIGIN = /^https:\/\/fonts\.(?:googleapis|gstatic)\.com\/?$/
+export function googleFontsStylesheetUrl(value: string): string | null {
+  const url = value.trim()
+  return url.length <= MAX_REMOTE_IMAGE_URL_LENGTH && GOOGLE_FONTS_STYLESHEET.test(url) ? url : null
+}
+
 // Anything the design may name as an image besides data:, as the rewriter sees it.
-const imageReference = (value: string) => assetReference(value) ?? remoteImageUrl(value)
+const imageReference = (value: string) => assetReference(value) ?? (googleFontsStylesheetUrl(value) ? null : remoteImageUrl(value))
 
 export const DESIGN_ARTIFACT_EMBEDDED_CSP = [
   "default-src 'none'",
@@ -166,7 +177,7 @@ const restore=()=>{
   frame.src=artifact;
   if(previous)URL.revokeObjectURL(previous);
 };
-const validPayload=value=>value&&value.protocol===1&&value.sessionId===preview.sessionId&&Number.isSafeInteger(value.revision)&&value.revision>0&&typeof value.sourceHtml==='string'&&new TextEncoder().encode(value.sourceHtml).length<=${MAX_DESIGN_ARTIFACT_BYTES}&&typeof value.renderHtml==='string'&&value.renderHtml.length<=${MAX_DESIGN_ARTIFACT_BYTES * 2}&&Array.isArray(value.images)&&value.images.length<=12&&value.images.every(image=>{
+const validPayload=value=>value&&value.protocol===1&&value.sessionId===preview.sessionId&&Number.isSafeInteger(value.revision)&&value.revision>0&&typeof value.sourceHtml==='string'&&new TextEncoder().encode(value.sourceHtml).length<=${MAX_DESIGN_ARTIFACT_BYTES}&&typeof value.renderHtml==='string'&&value.renderHtml.length<=${MAX_RENDER_HTML_LENGTH}&&Array.isArray(value.images)&&value.images.length<=12&&value.images.every(image=>{
   if(!image||typeof image.marker!=='string'||!image.marker||image.marker.length>256||typeof image.src!=='string')return false;
   try{const url=new URL(image.src,location.href);return url.origin===location.origin&&url.pathname==='/api/artifact-image'&&!url.username&&!url.password;}catch{return false;}
 });
@@ -337,6 +348,8 @@ interface SourceRange {
 
 interface HtmlTag {
   name: string
+  // The whole opening tag.
+  range: SourceRange
   attributes: Map<string, string>
   valueRanges: Map<string, SourceRange>
   duplicateAttribute: string | null
@@ -414,7 +427,7 @@ function parseOpeningTags(source: string): HtmlTag[] {
     if (end < 0) break
     const name = nameMatch[1].toLowerCase()
     const attributeStart = start + 1 + nameMatch[0].length
-    const tag: HtmlTag = { name, ...parseAttributes(source.slice(attributeStart, end), attributeStart) }
+    const tag: HtmlTag = { name, range: { start, end: end + 1 }, ...parseAttributes(source.slice(attributeStart, end), attributeStart) }
     tags.push(tag)
     if (name === 'script' || name === 'style') {
       const closing = normalized.indexOf(`</${name}`, end + 1)
@@ -502,6 +515,16 @@ function remoteSrcset(value: string, accept: (url: string) => string | null = im
 
 const remoteImageValue = (rawValue: string) => imageReference(decodeAttribute(rawValue))
 
+// A <link> to Google Fonts: its stylesheet, or a preconnect to its hosts, which models add
+// out of habit. Returns the stylesheet URL, '' for a preconnect, or null for any other link.
+function googleFontsLink(tag: HtmlTag): string | null {
+  if (tag.name !== 'link') return null
+  const rel = decodeAttribute(tag.attributes.get('rel') ?? '').toLowerCase().split(/\s+/)
+  const href = decodeAttribute(tag.attributes.get('href') ?? '')
+  if (rel.includes('stylesheet')) return googleFontsStylesheetUrl(href)
+  return (rel.includes('preconnect') || rel.includes('dns-prefetch')) && GOOGLE_FONTS_ORIGIN.test(href) ? '' : null
+}
+
 function validateTag(tag: HtmlTag, remote: boolean): string | null {
   const allowed = (value: string) => assetReference(value) ?? (remote ? remoteImageUrl(value) : null)
   const allowedValue = (rawValue: string) => allowed(decodeAttribute(rawValue))
@@ -533,7 +556,9 @@ function validateTag(tag: HtmlTag, remote: boolean): string | null {
       const isSafeSvgImage = tag.name === 'image' && (/^data:image\//i.test(value) || !!allowed(value))
       // Links to https pages (cited sources, references) open in a new tab; see the bootstrap.
       const isExternalLink = tag.name === 'a' && name === 'href' && /^https:\/\/[^\s]+$/i.test(value)
-      if (!value.startsWith('#') && !isSafeSvgImage && !isExternalLink) {
+      // Google Fonts are embedded before the design runs (lib/google-fonts.ts).
+      const isFontLink = remote && name === 'href' && googleFontsLink(tag) != null
+      if (!value.startsWith('#') && !isSafeSvgImage && !isExternalLink && !isFontLink) {
         return `design artifact ${name} values must be local fragments, https links, or compatible embedded data: URLs`
       }
     }
@@ -588,15 +613,73 @@ export function rewriteRemoteImages(html: string, embed: (url: string) => string
       for (const edit of cssUrlEdits(html, lower, tag.content, false)) { const value = image(edit.url); if (value) edits.push({ ...edit, text: `url(${value})` }) }
     }
   }
-  // One pass, so the cost grows with the output, not with the number of edits.
+  return applyEdits(html, edits)
+}
+
+// One pass, so the cost grows with the output, not with the number of edits. An
+// insertion (an empty range) goes before a replacement that starts at the same place.
+function applyEdits(html: string, edits: (SourceRange & { text: string })[]): string {
   const parts: string[] = []
   let cursor = 0
-  for (const edit of edits.sort((a, b) => a.start - b.start)) {
+  for (const edit of edits.sort((a, b) => a.start - b.start || a.end - b.end)) {
     parts.push(html.slice(cursor, edit.start), edit.text)
     cursor = edit.end
   }
   parts.push(html.slice(cursor))
   return parts.join('')
+}
+
+const GOOGLE_FONTS_IMPORT = /@import\s+(?:url\(\s*(["']?)([^"'()\s]+)\1\s*\)|(["'])([^"'\s]+)\3)[^;{}<]*;?/gi
+
+// The Google Fonts stylesheets a design names, in document order and at most
+// MAX_FONT_STYLESHEETS, and the edits that take every reference to them out of a
+// prepared copy. A <link> keeps its place with an empty href, which fetches nothing, and
+// an @import is removed: no element moves, so live updates still pair the rendered design
+// with its source (lib/preview-update.ts).
+function googleFontReferences(html: string) {
+  const urls: string[] = []
+  const edits: (SourceRange & { text: string })[] = []
+  let firstStyle: SourceRange | null = null
+  let headEnd = -1
+  const add = (url: string) => { if (!urls.includes(url) && urls.length < MAX_FONT_STYLESHEETS) urls.push(url) }
+  for (const tag of parseOpeningTags(html)) {
+    if (tag.name === 'head' && headEnd < 0) headEnd = tag.range.end
+    const link = googleFontsLink(tag)
+    const href = tag.valueRanges.get('href')
+    if (link != null && href) {
+      if (link) add(link)
+      edits.push({ ...href, text: '""' })
+    }
+    if (tag.content) {
+      firstStyle ??= tag.content
+      const css = html.slice(tag.content.start, tag.content.end)
+      for (const match of css.matchAll(GOOGLE_FONTS_IMPORT)) {
+        const url = googleFontsStylesheetUrl(match[2] ?? match[4])
+        if (!url) continue
+        add(url)
+        const start = tag.content.start + match.index
+        edits.push({ start, end: start + match[0].length, text: '' })
+      }
+    }
+  }
+  return { urls, edits, firstStyle, headEnd }
+}
+
+export function googleFontStylesheets(html: string): string[] {
+  return googleFontReferences(html).urls
+}
+
+// A prepared copy without its Google Fonts references, with `css` (their embedded faces,
+// from lib/google-fonts.ts) first in the design's first <style>, or in a new one at the
+// top of <head> when it has none.
+export function inlineGoogleFonts(html: string, css: string): string {
+  const { urls, edits, firstStyle, headEnd } = googleFontReferences(html)
+  // The faces are fx0's own serialization; anything that could close the element is dropped.
+  if (urls.length && css && !css.includes('<')) {
+    if (firstStyle) edits.push({ start: firstStyle.start, end: firstStyle.start, text: css })
+    else if (headEnd >= 0) edits.push({ start: headEnd, end: headEnd, text: `<style>${css}</style>` })
+  }
+  return edits.length ? applyEdits(html, edits) : html
 }
 
 // The embedded value lands unquoted in CSS url() and quoted in attributes, so it must
