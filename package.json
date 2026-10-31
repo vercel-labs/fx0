@@ -11,8 +11,11 @@
     "start": "next start",
     "test:core": "node --experimental-strip-types --test tests/core.test.mjs tests/session-summary.test.mjs tests/function-grouping.test.mjs tests/transcript.test.mjs tests/design-draft.test.mjs tests/design-publish.test.mjs tests/event-delivery.test.mjs tests/event-stream.test.mjs tests/public-fetch.test.mjs tests/remote-image.test.mjs tests/prompt-images.test.mjs tests/design-assets.test.mjs tests/capture-protocol.test.mjs tests/runtime.test.mjs",
     "test:auth": "node --experimental-strip-types --test tests/auth.test.mjs tests/auth-callback.test.mjs tests/signout.test.mjs tests/ownership.test.mjs tests/history.test.mjs tests/route-security.test.mjs tests/gateway-session.test.mjs tests/libfx-transport.test.mjs tests/libfx-agent.test.mjs tests/auth-ui.test.mjs tests/html-ui.test.mjs tests/guest-ui.test.mjs tests/guest-draft.test.mjs tests/trial.test.mjs tests/turn-funding.test.mjs",
+    "test:collab": "node --experimental-strip-types --test tests/collab-ampersand.test.mjs tests/collab-design-tools.test.mjs tests/collab-group.test.mjs tests/collab-limits.test.mjs tests/collab-routes.test.mjs tests/collab-pending.test.mjs tests/collab-ui.test.mjs tests/collab-store.test.mjs tests/collab-ui-regressions.test.mjs tests/collab-neon.test.mjs",
+    "test:collab:postgres": "node --experimental-strip-types --test tests/collab-postgres.integration.mjs",
     "test:journal:integration": "node --env-file-if-exists=.env.local --experimental-strip-types --test tests/journal.integration.mjs",
     "test:smoke": "node tests/local-auth-smoke.mjs",
+    "test:normal:isolation": "node --test tests/normal-isolation.smoke.mjs",
     "db:migrate": "node --env-file-if-exists=.env.local scripts/migrate-database.mjs",
     "test:artifact:browser": "node --experimental-strip-types --test tests/design-artifact.browser.mjs tests/attach-image.browser.mjs tests/preview-update.browser.mjs",
     "test:budget:integration": "node --experimental-strip-types --test tests/turn-budget.integration.mjs",
@@ -38,6 +41,7 @@
     "libfx": "0.0.15",
     "next": "^16.4.2",
     "next-themes": "^0.4.6",
+    "openai": "^7.43.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-markdown": "^10.1.0",
@@ -47,6 +51,7 @@
     "node": "24.x"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.12",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^26.5.1",
     "@types/react": "^19.3.0",
