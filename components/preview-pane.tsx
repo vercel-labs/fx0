@@ -5,7 +5,7 @@ import { designLinkUrl } from '../lib/design-link'
 import { EMPTY_DRAFT_DOCUMENT, patchDraftDocument } from '../lib/draft-preview'
 import { CAPTURE_PAINT_MS, CAPTURE_PREVIEW_START_MS, type CaptureFailure } from '../lib/capture-protocol'
 import { captureFrame, reportCaptureFailure, sendCapture, type CaptureRequest } from './design-capture'
-import { isPreviewErrorStatus, PREVIEW_PREPARE_MS, PREVIEW_PROTOCOL, type PreviewPayload } from '../lib/preview-update'
+import { isPreviewErrorStatus, MAX_RENDER_HTML_LENGTH, PREVIEW_PREPARE_MS, PREVIEW_PROTOCOL, type PreviewPayload } from '../lib/preview-update'
 import { AuthRouteError, fetchUi, signalAuthRequired, uiAuthError } from './auth-ui'
 import DesignLinkDialog from './design-link-dialog'
 import { HowItWorksPanel } from './how-it-works'
@@ -45,7 +45,7 @@ function isPreviewPayload(value: unknown): value is PreviewPayload {
   return payload.protocol === PREVIEW_PROTOCOL && typeof payload.sessionId === 'string'
     && Number.isSafeInteger(payload.revision) && payload.revision! > 0
     && typeof payload.sourceHtml === 'string' && new TextEncoder().encode(payload.sourceHtml).length <= 512 * 1024
-    && typeof payload.renderHtml === 'string' && payload.renderHtml.length <= 1024 * 1024
+    && typeof payload.renderHtml === 'string' && payload.renderHtml.length <= MAX_RENDER_HTML_LENGTH
     && Array.isArray(payload.images) && payload.images.length <= 12 && payload.images.every((image) => {
       if (image == null || typeof image.marker !== 'string' || !image.marker || image.marker.length > 256 || typeof image.src !== 'string') return false
       try {

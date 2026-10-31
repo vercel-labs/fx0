@@ -156,6 +156,7 @@ const mocks = {
   'components/chat-app.tsx': 'export default function ChatApp() {}',
   'lib/remote-image-cache.ts': `
     export async function cachedRemoteImage() { return 'data:image/png;base64,aW1hZ2U='; }
+    export async function cachedGoogleFontCss() { return '@font-face{font-family:Test}'; }
   `,
 }
 registerHooks({

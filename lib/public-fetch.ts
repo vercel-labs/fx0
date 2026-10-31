@@ -47,7 +47,7 @@ export async function publicDestination(input: string, resolve = dns.lookup) {
 // base64 data: URL in one Runtime Cache entry, which holds at most 2 MB.
 export const MAX_IMAGE_FETCH_BYTES = 1.25 * 1024 * 1024
 
-interface FetchOptions { maxBytes: number; httpsOnly?: boolean; accept?: string }
+interface FetchOptions { maxBytes: number; httpsOnly?: boolean; accept?: string; userAgent?: string }
 
 export async function fetchPublicText(input: string, signal: AbortSignal) {
   const { status, url, body } = await fetchPublic(input, signal, { maxBytes: MAX_FETCH_BYTES })
@@ -59,6 +59,30 @@ export async function fetchPublicImage(input: string, signal: AbortSignal) {
     maxBytes: MAX_IMAGE_FETCH_BYTES, httpsOnly: true, accept: 'image/avif,image/webp,image/png,image/jpeg,image/gif',
   })
   if (response.status < 200 || response.status > 299) throw new Error('Image request failed')
+  return response
+}
+
+// Google Fonts a design names (lib/google-fonts.ts). Google serves woff2 only to browsers
+// it recognizes, so these requests name one. Every hop must stay on Google's font hosts.
+export const MAX_FONT_FETCH_BYTES = 256 * 1024
+const BROWSER_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+
+export async function fetchGoogleFontsStylesheet(input: string, signal: AbortSignal): Promise<string> {
+  const { body } = await fetchGoogleFonts(input, 'fonts.googleapis.com', signal, { maxBytes: MAX_FETCH_BYTES, accept: 'text/css,*/*;q=0.1' })
+  return body.toString('utf8')
+}
+
+/** One woff2 font file; throws for anything else. */
+export async function fetchGoogleFontFile(input: string, signal: AbortSignal): Promise<Buffer> {
+  const { body } = await fetchGoogleFonts(input, 'fonts.gstatic.com', signal, { maxBytes: MAX_FONT_FETCH_BYTES, accept: 'font/woff2' })
+  if (body.subarray(0, 4).toString('latin1') !== 'wOF2') throw new Error('Not a woff2 font')
+  return body
+}
+
+async function fetchGoogleFonts(input: string, host: string, signal: AbortSignal, options: FetchOptions) {
+  if (new URL(input).hostname !== host) throw new Error('Not a Google Fonts URL')
+  const response = await fetchPublic(input, signal, { ...options, httpsOnly: true, userAgent: BROWSER_USER_AGENT })
+  if (response.status < 200 || response.status > 299 || new URL(response.url).hostname !== host) throw new Error('Font request failed')
   return response
 }
 
@@ -79,7 +103,7 @@ async function fetchPublic(input: string, signal: AbortSignal, options: FetchOpt
       const transport = url.protocol === 'https:' ? https : http
       const request = transport.request(url, {
         signal, agent: false,
-        headers: { 'user-agent': 'fx0/1.0', 'accept-encoding': 'identity', ...(options.accept ? { accept: options.accept } : {}) },
+        headers: { 'user-agent': options.userAgent ?? 'fx0/1.0', 'accept-encoding': 'identity', ...(options.accept ? { accept: options.accept } : {}) },
         // Keep the URL hostname for Host and TLS certificate verification.
         lookup: (_hostname, options, callback) => {
           if (options.all) callback(null, [address])
