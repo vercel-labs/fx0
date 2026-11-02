@@ -390,7 +390,11 @@ test('the instructions make the agent screenshot its design when implementing or
   await runtime.submitPrompt(boundHost('reference-chat'), 'Ada', 'Reimplement this exactly')
   const { instructions } = f.sent[0].sessionOptions
   assert.match(instructions, /asks to implement, replicate, recreate, clone, or match a design, page, or site, whether from an attached image, a URL, or a description, or asks for an exact copy, verify before reporting: after publishing, call screenshot_design/)
-  assert.match(instructions, /at the width the reference was made at when there is one/)
+  assert.match(instructions, /at the reference's CSS viewport width when known, not its raw or downscaled pixel width/)
+  assert.match(instructions, /Without density evidence, do not assume 2x or 3x/)
+  assert.match(instructions, /Do not shrink the whole design to make it fit the preview/)
+  assert.match(instructions, /do not independently fit both images to the same thumbnail size, which hides scale errors/)
+  assert.match(instructions, /capture again to verify the edited result/)
   assert.match(instructions, /After an edit that changes size, alignment, spacing, layout, or cropping, including a fix the user asked for after looking, call screenshot_design after the edit/)
   assert.match(instructions, /A screenshot taken before the edit does not verify it\./)
   const tool = f.agentOptions.tools.find((candidate) => candidate.name === 'screenshot_design')
@@ -430,10 +434,22 @@ test('attached images upload while libfx admits the prompt; the model gets their
   await new Promise((resolve) => setTimeout(resolve, 20))
   assert.equal(f.sent.length, 1, 'libfx has the prompt before the upload finished')
   assert.equal(f.sent[0].input[0].text, '[Ada] Use my logo\n\n[Attached images the design can show: Image #1 = fx0-asset:AbCdEfGhIjKlMnOpQrStUvWx]')
+  assert.match(f.sent[0].sessionOptions.instructions, /preserve its on-screen scale as well as its proportions/)
   finishUpload()
   await submitted
   assert.ok(!f.events.some((item) => item.type === 'error'))
   assert.equal(f.calls.filter((call) => call[0] === 'cancel').length, 0)
+})
+
+test('the model is told an attached screenshot\'s real size, beside its reference', async (t) => {
+  const f = fixture(t)
+  const images = [{ type: 'image', mimeType: 'image/png', data: 'cG5n' }]
+  await runtime.submitPrompt(boundHost('sized-chat'), 'Ada', 'reimplement this exactly', undefined, images, undefined, undefined, undefined, undefined,
+    { handles: ['AbCdEfGhIjKlMnOpQrStUvWx'], stored: Promise.resolve() },
+    [{ width: 2048, height: 1280, source: { width: 2880, height: 1800, density: 2 } }])
+  assert.equal(f.sent[0].input[0].text, '[Ada] reimplement this exactly\n\n[Attached images the design can show: Image #1 = fx0-asset:AbCdEfGhIjKlMnOpQrStUvWx]'
+    + '\n\n[Image #1: original 2880×1800 px; sent at 2048×1280 px (the model provider may resize it further); filename suggests 2x; at that scale the captured area is 1440×900 CSS px, not necessarily the full viewport.]')
+  assert.deepEqual(f.sent[0].input[1], images[0], 'the image part carries no extra fields')
 })
 
 test('if the upload fails after libfx admitted the prompt, the turn is cancelled with a visible error', async (t) => {

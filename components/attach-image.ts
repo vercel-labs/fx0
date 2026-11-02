@@ -1,10 +1,19 @@
 import { imageThumbnail } from './image-thumbnail'
+import type { ImageSource } from '../lib/image-source'
 
 export interface NormalizedImage {
   data: string
   mimeType: string
   preview: string
   thumbnail: string | null
+  /** The picked file's own size, before any downscaling, and its density when its name says. */
+  source: ImageSource
+}
+
+// A filename supplies a density hint, not proof of a screenshot's CSS viewport.
+function imageSource(name: string, width: number, height: number): ImageSource {
+  const density = Number(/@([123])x\.[a-z0-9]+$/i.exec(name)?.[1])
+  return { width, height, ...(density === 1 || density === 2 || density === 3 ? { density } : {}) }
 }
 
 // What the composer sends for one attached image: at most 2048 px on a side, usually
@@ -54,9 +63,9 @@ function encode(canvas: HTMLCanvasElement, type: string, quality: number): Promi
   return new Promise((resolve) => canvas.toBlob(resolve, type, quality))
 }
 
-async function finish(blob: Blob): Promise<NormalizedImage> {
+async function finish(blob: Blob, source: ImageSource): Promise<NormalizedImage> {
   const preview = await readDataUrl(blob)
-  return { data: preview.slice(preview.indexOf(',') + 1), mimeType: blob.type, preview, thumbnail: await imageThumbnail(preview) }
+  return { data: preview.slice(preview.indexOf(',') + 1), mimeType: blob.type, preview, thumbnail: await imageThumbnail(preview), source }
 }
 
 /** One picked, pasted or dropped file as the composer sends it, or an error to show. */
@@ -64,9 +73,10 @@ export async function normalizeImage(file: File, { webp = true } = {}): Promise<
   if (file.size > MAX_SOURCE_BYTES) throw new Error('the selected image is larger than 40 MB.')
   const source = await decode(file)
   if (source.width * source.height > MAX_SOURCE_PIXELS) throw new Error('the selected image has too many pixels.')
+  const original = imageSource(file.name, source.width, source.height)
   // Already small enough: sent as is, so a GIF keeps its animation and nothing is re-encoded.
   const small = file.size <= TARGET_BYTES && Math.max(source.width, source.height) <= MAX_SIDE
-  if (small && (KEPT_AS_IS.includes(file.type) || file.type === 'image/gif')) return finish(file)
+  if (small && (KEPT_AS_IS.includes(file.type) || file.type === 'image/gif')) return finish(file, original)
 
   const canvas = document.createElement('canvas')
   const context = canvas.getContext('2d')
@@ -95,10 +105,10 @@ export async function normalizeImage(file: File, { webp = true } = {}): Promise<
       }
       if (!blob) continue
       if (!smallest || blob.size < smallest.size) smallest = blob
-      if (blob.size <= TARGET_BYTES) return finish(blob)
+      if (blob.size <= TARGET_BYTES) return finish(blob, original)
       if (blob.type === 'image/png') break
     }
   }
   if (!smallest) throw new Error('unable to read the selected image.')
-  return finish(smallest)
+  return finish(smallest, original)
 }

@@ -124,6 +124,7 @@ export const POST = withPromptRoute(async (request, context) => {
       funding,
       'kind' in session ? undefined : session,
       assets,
+      images ? checkedImages.sizes : undefined,
     )
   } catch (error) {
     if (reservation) await trialStore().release(reservation).catch(() => console.error('[fx0] free prompt release failed'))

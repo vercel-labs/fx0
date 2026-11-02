@@ -21,17 +21,17 @@ async function attachCode() {
 }
 
 const PAGE = (code) => `<!doctype html><html><head><title>attach</title></head><body><pre id="out">{}</pre><script>${code}
-const canvasFile = async (width, height, { type = 'image/png', transparent = false, quality } = {}) => {
+const canvasFile = async (width, height, { type = 'image/png', transparent = false, quality, name = 'image' } = {}) => {
   const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height
   const context = canvas.getContext('2d')
   if (!transparent) { const gradient = context.createLinearGradient(0, 0, width, height); gradient.addColorStop(0, '#2a6'); gradient.addColorStop(1, '#a26'); context.fillStyle = gradient; context.fillRect(0, 0, width, height) }
   for (let i = 0; i < 400; i++) { context.fillStyle = 'hsl(' + (i * 37 % 360) + ' 70% 50%)'; context.beginPath(); context.arc((i * 97) % width, (i * 53) % height, 20 + i % 60, 0, 7); context.fill() }
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, type, quality))
-  return new File([blob], 'image', { type })
+  return new File([blob], name, { type })
 }
 const describe = async (result) => {
   const image = new Image(); image.src = result.preview; await image.decode()
-  return { type: result.mimeType, width: image.naturalWidth, height: image.naturalHeight, bytes: atob(result.data).length, thumbnail: !!result.thumbnail && result.thumbnail.startsWith('data:image/jpeg') }
+  return { type: result.mimeType, width: image.naturalWidth, height: image.naturalHeight, bytes: atob(result.data).length, thumbnail: !!result.thumbnail && result.thumbnail.startsWith('data:image/jpeg'), source: result.source }
 }
 ;(async () => {
   const out = {}
@@ -39,6 +39,10 @@ const describe = async (result) => {
     try { out[name] = await describe(await normalizeImage(await make(), options)) } catch (error) { out[name] = { error: error.message } }
   }
   await run('photo', () => canvasFile(4000, 3000))
+  await run('retina', () => canvasFile(2880, 1800, { name: 'CleanShot 2026-10-31 at 4.31.10 PM@2x.png' }))
+  await run('pasted', () => canvasFile(2880, 1800, { name: 'image.png' }))
+  await run('oneX', () => canvasFile(1440, 900, { name: 'CleanShot@1x.png' }))
+  await run('threeX', () => canvasFile(2880, 1800, { name: 'Screen@3x.png' }))
   await run('transparentNoWebp', () => canvasFile(3000, 2000, { transparent: true }), { webp: false })
   await run('opaqueNoWebp', () => canvasFile(3000, 2000), { webp: false })
   const small = await canvasFile(800, 600, { type: 'image/jpeg', quality: 0.8 })
@@ -75,6 +79,14 @@ test('in Chrome, attached images are resized, re-encoded and kept small, and unr
     assert.deepEqual([out.photo.width, out.photo.height], [2048, 1536])
     assert.ok(out.photo.bytes <= 700 * 1024, `photo is ${out.photo.bytes} bytes`)
     assert.equal(out.photo.thumbnail, true)
+    assert.deepEqual(out.photo.source, { width: 4000, height: 3000 }, 'the original size survives the downscale')
+    assert.deepEqual([out.retina.width, out.retina.height], [2048, 1280])
+    assert.deepEqual(out.retina.source, { width: 2880, height: 1800, density: 2 }, 'a @2x name gives the density')
+    assert.deepEqual([out.pasted.width, out.pasted.height], [2048, 1280])
+    assert.deepEqual(out.pasted.source, { width: 2880, height: 1800 }, 'pasting keeps original size without inventing a density')
+    assert.deepEqual(out.oneX.source, { width: 1440, height: 900, density: 1 })
+    assert.deepEqual(out.threeX.source, { width: 2880, height: 1800, density: 3 })
+    assert.deepEqual(out.smallJpeg.source, { width: 800, height: 600 })
     assert.equal(out.transparentNoWebp.type, 'image/png', 'without WebP, transparency keeps PNG')
     assert.ok(Math.max(out.transparentNoWebp.width, out.transparentNoWebp.height) <= 2048)
     assert.equal(out.opaqueNoWebp.type, 'image/jpeg', 'without WebP, an opaque image becomes JPEG')
