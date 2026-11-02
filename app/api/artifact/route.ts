@@ -1,4 +1,6 @@
-import { assetReference, BLANK_IMAGE, rewriteRemoteImages } from '../../../lib/design-artifact'
+import { assetReference, BLANK_IMAGE, remoteImagesEnabled, rewriteRemoteImages } from '../../../lib/design-artifact'
+import { embedGoogleFonts } from '../../../lib/google-fonts'
+import { cachedGoogleFontCss } from '../../../lib/remote-image-cache'
 import { readDesignAsset } from '../../../lib/design-assets'
 import { readDesignArtifact } from '../../../lib/journal'
 import { readGeneration } from '../../../lib/history'
@@ -33,7 +35,7 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
     if (asset) loaded.set(handle, `data:${asset.mimeType};base64,${asset.bytes.toString('base64')}`)
   }))
   let total = 0
-  const exported = handles.size ? rewriteRemoteImages(html, (reference) => {
+  let exported = handles.size ? rewriteRemoteImages(html, (reference) => {
     const asset = assetReference(reference)
     if (!asset) return null
     const data = loaded.get(asset.slice('fx0-asset:'.length))
@@ -41,7 +43,10 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
     total += data.length
     return data
   }) : html
-  // Streamed: embedded images can take it past the buffered response limit.
+  // Use the same bounded font preparation as the preview, including past revisions.
+  // Always remove the external links, even when downloads are disabled or unavailable.
+  exported = await embedGoogleFonts(exported, remoteImagesEnabled() ? cachedGoogleFontCss : async () => '')
+  // Streamed: embedded images and fonts can take it past the buffered response limit.
   const body = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(exported)); controller.close() } })
   return new Response(body, {
     headers: {

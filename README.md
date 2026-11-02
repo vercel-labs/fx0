@@ -14,6 +14,7 @@ Try it at [fx0.vercel.dev](https://fx0.vercel.dev), or clone it and make it your
 - Every turn keeps its version of the design. You can reopen any of them and copy or download the HTML.
 - Pick each chat's model, with its reasoning effort and fast mode. New chats start on fast Claude Opus 5.5, or on `FX0_MODEL` when it's set.
 - The agent can search the web and fetch pages for reference.
+- Use Google Fonts for English and Spanish designs. fx0 downloads and embeds Latin WOFF2 faces on the server, so previews and exported HTML need no font connections. Include a fallback font; failed or over-budget fonts use it.
 - Ask the agent to inspect its result: `screenshot_design` returns images of the published preview to the model, either the visible viewport or the full page in tiles. An optional `width` captures at that viewport width (320-1920 CSS px), so a design can be compared with a reference at the reference's own width rather than the preview's.
 - Start from one of ten `design.md` styles, or upload your own. The ten styles, and the one-line descriptions in the picker, come from VoltAgent's [awesome-design-md](https://github.com/VoltAgent/awesome-design-md), which you can browse at [getdesign.md](https://getdesign.md). Thanks to VoltAgent for publishing them.
 - Type a message before you sign in. The draft, images included, waits in the tab for 15 minutes while you sign in.
@@ -136,6 +137,21 @@ You can watch this happen. Open session diagnostics from the header to see the c
 | [`components/`](components) | The chat, composer, preview and diagnostics panel |
 
 Neon Postgres holds accounts, who owns each chat, finished turns and every design version ([`migrations/`](migrations)).
+
+## Google Fonts
+
+The agent can use a Google Fonts stylesheet in `<head>`, for example:
+
+```html
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap">
+<style>body { font-family: 'Inter', sans-serif; }</style>
+```
+
+fx0 resolves at most four stylesheet URLs and embeds their Latin WOFF2 faces before the design runs, including when copying or downloading a live or historical design. The model-written HTML stays small and editable. `@import` is supported too. The existing `FX0_REMOTE_IMAGES=0` switch also disables font downloads.
+
+Each stylesheet has a five-second total download deadline, at most 16 font files with four in flight, a 256 KiB per-file cap and a 512 KiB embedded-byte budget. The combined font CSS is capped at 768 KiB per rendered design. Font requests use HTTPS, stay on the expected Google origin at every redirect, and retain the public-IP and pinned-DNS checks. The preview's CSP remains `font-src data:` and `connect-src 'none'`.
+
+The shared Runtime Cache avoids repeated downloads; unavailable or over-budget faces fall back to the CSS font stack. History preserves the design's HTML, not a snapshot of its external resources: after cache revalidation, Google's stylesheet may resolve to a different font version, just as a remote image can change. Successful exported fonts are embedded in the downloaded file; failed ones are removed rather than left as external links. Other writing systems and fully frozen resource history are outside this feature's scope.
 
 ## Run it locally
 

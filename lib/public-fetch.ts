@@ -47,7 +47,7 @@ export async function publicDestination(input: string, resolve = dns.lookup) {
 // base64 data: URL in one Runtime Cache entry, which holds at most 2 MB.
 export const MAX_IMAGE_FETCH_BYTES = 1.25 * 1024 * 1024
 
-interface FetchOptions { maxBytes: number; httpsOnly?: boolean; accept?: string; userAgent?: string }
+interface FetchOptions { maxBytes: number; httpsOnly?: boolean; accept?: string; userAgent?: string; allowedOrigin?: string }
 
 export async function fetchPublicText(input: string, signal: AbortSignal) {
   const { status, url, body, contentType } = await fetchPublic(input, signal, { maxBytes: MAX_FETCH_BYTES })
@@ -80,9 +80,10 @@ export async function fetchGoogleFontFile(input: string, signal: AbortSignal): P
 }
 
 async function fetchGoogleFonts(input: string, host: string, signal: AbortSignal, options: FetchOptions) {
-  if (new URL(input).hostname !== host) throw new Error('Not a Google Fonts URL')
-  const response = await fetchPublic(input, signal, { ...options, httpsOnly: true, userAgent: BROWSER_USER_AGENT })
-  if (response.status < 200 || response.status > 299 || new URL(response.url).hostname !== host) throw new Error('Font request failed')
+  const allowedOrigin = `https://${host}`
+  if (new URL(input).origin !== allowedOrigin) throw new Error('Not a Google Fonts URL')
+  const response = await fetchPublic(input, signal, { ...options, httpsOnly: true, userAgent: BROWSER_USER_AGENT, allowedOrigin })
+  if (response.status < 200 || response.status > 299) throw new Error('Font request failed')
   return response
 }
 
@@ -91,6 +92,8 @@ async function fetchPublic(input: string, signal: AbortSignal, options: FetchOpt
   let next = input
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     signal.throwIfAborted()
+    // Check before DNS and connection, not just after the last redirect.
+    if (options.allowedOrigin && new URL(next).origin !== options.allowedOrigin) throw new Error('Disallowed fetch origin')
     const destination = await new Promise<Awaited<ReturnType<typeof publicDestination>>>((resolve, reject) => {
       const abort = () => reject(signal.reason)
       signal.addEventListener('abort', abort, { once: true })

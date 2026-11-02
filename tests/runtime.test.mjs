@@ -399,6 +399,8 @@ test('the instructions make the agent screenshot its design when implementing or
   assert.match(instructions, /A screenshot taken before the edit does not verify it\./)
   const tool = f.agentOptions.tools.find((candidate) => candidate.name === 'screenshot_design')
   assert.match(tool.description, /asks to implement, replicate, or match a design, page, or site \(from an image, a URL, or a description\)/)
+  const publish = f.agentOptions.tools.find((candidate) => candidate.name === 'publish_design')
+  assert.match(publish.description, /Google Fonts stylesheet links when enabled/)
 })
 
 test('image messages use prompt admission and retain their images, identity and chat context', async (t) => {

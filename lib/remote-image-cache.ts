@@ -12,8 +12,9 @@ export async function cachedRemoteImage(url: string): Promise<string> {
   return loadRemoteImage(url)
 }
 
-// A Google Fonts stylesheet with its files embedded (lib/google-fonts.ts), at most
-// about 700 KB, so one entry holds it. Google's font URLs are versioned, so a day is safe.
+// A Google Fonts stylesheet with its files embedded (lib/google-fonts.ts), bounded
+// by the rendered-CSS budget so one entry holds it. This is a cache, not a snapshot:
+// the stylesheet query can resolve to different font files after revalidation.
 export async function cachedGoogleFontCss(url: string): Promise<string> {
   'use cache: remote'
   cacheLife({ revalidate: 86400, expire: 7 * 86400 })

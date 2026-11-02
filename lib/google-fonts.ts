@@ -12,6 +12,9 @@ import { fetchGoogleFontFile, fetchGoogleFontsStylesheet } from './public-fetch.
 
 // The raw font bytes one stylesheet may embed. Latin faces are 15-50 KB each.
 export const MAX_EMBEDDED_FONT_BYTES = 512 * 1024
+// Cap work before downloading; a CSS response can name many more files than fit.
+export const MAX_FONT_FILES = 16
+const FONT_CONCURRENCY = 4
 
 const FACE = /(?:\/\*\s*([^*]*?)\s*\*\/\s*)?@font-face\s*\{([^{}]*)\}/g
 const FONT_FILE = /url\((https:\/\/fonts\.gstatic\.com\/[A-Za-z0-9/._-]+\.woff2)\)\s*format\(['"]woff2['"]\)/
@@ -57,25 +60,22 @@ export async function compileGoogleFontCss(css: string, loadFont: (url: string) 
     if (known) known.weights.push(...face.weights)
     else faces.set(key, face)
   }
-  const urls = [...new Set([...faces.values()].map((face) => face.url))]
-  const files = new Map(await Promise.all(urls.map(async (url) => [url, await loadFont(url).catch(() => null)] as const)))
+  const urls = [...new Set([...faces.values()].map((face) => face.url))].slice(0, MAX_FONT_FILES)
+  const embedded = new Map<string, string>()
   let bytes = 0
-  const embedded = new Map<string, string | null>()
-  const data = (url: string) => {
-    if (!embedded.has(url)) {
-      const file = files.get(url)
+  for (let index = 0; index < urls.length && bytes < MAX_EMBEDDED_FONT_BYTES; index += FONT_CONCURRENCY) {
+    const batch = await Promise.all(urls.slice(index, index + FONT_CONCURRENCY).map(async (url) =>
+      [url, await loadFont(url).catch(() => null)] as const))
+    for (const [url, file] of batch) {
       if (file != null && bytes + file.length <= MAX_EMBEDDED_FONT_BYTES) {
         bytes += file.length
         embedded.set(url, `data:font/woff2;base64,${file.toString('base64')}`)
-      } else {
-        embedded.set(url, null)
       }
     }
-    return embedded.get(url)
   }
   let out = ''
   for (const face of faces.values()) {
-    const src = data(face.url)
+    const src = embedded.get(face.url)
     if (!src) continue
     const declarations = [...face.descriptors].map(([name, value]) => `${name}:${value}`)
     if (face.weights.length) {
@@ -83,15 +83,26 @@ export async function compileGoogleFontCss(css: string, loadFont: (url: string) 
       declarations.push(`font-weight:${low === high ? low : `${low} ${high}`}`)
     }
     declarations.push(`src:url(${src}) format('woff2')`)
-    out += `@font-face{${declarations.join(';')}}`
+    const rule = `@font-face{${declarations.join(';')}}`
+    if (out.length + rule.length <= MAX_EMBEDDED_FONT_CSS_LENGTH) out += rule
   }
   return out
 }
 
 /** One stylesheet's embedded faces. Throws when Google cannot be reached. */
 export async function loadGoogleFontCss(url: string): Promise<string> {
-  const css = await fetchGoogleFontsStylesheet(url, AbortSignal.timeout(5_000))
-  return compileGoogleFontCss(css, (file) => fetchGoogleFontFile(file, AbortSignal.timeout(5_000)))
+  // One deadline covers CSS and font downloads, keeping cold loads inside the preview budget.
+  const signal = AbortSignal.timeout(5_000)
+  const css = await fetchGoogleFontsStylesheet(url, signal)
+  let failed = false
+  const embedded = await compileGoogleFontCss(css, async (file) => {
+    try { return await fetchGoogleFontFile(file, signal) }
+    catch (error) { failed = true; throw error }
+  })
+  // A transient failure must not become a cached missing style for the next day.
+  if (failed) throw new Error('Google Fonts download incomplete')
+  if (!embedded) throw new Error('No usable Latin WOFF2 font faces')
+  return embedded
 }
 
 /**

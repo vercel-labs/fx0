@@ -88,7 +88,7 @@ export function createTools(host: ToolHost, opts: { allowSubagent?: boolean } = 
   const publishDesign: FxHostTool = {
     name: 'publish_design',
     description:
-      'Publish one complete self-contained HTML document as the authoritative design. Inline CSS and JavaScript, Canvas, animation, and event handlers are supported inside the secure preview iframe. Use once for the first design or for a broad rewrite; keep normal drafts under 12 KiB. It must include doctype, html, head, and body; keep scripts inline; use only accepted data: assets, local fragments, or <a href="https://..."> links (they open in a new tab); and do not add HTML comments, external assets, forms, scripted navigation, or nested frames. Use edit_design instead for localized follow-ups.',
+      'Publish one complete self-contained HTML document as the authoritative design. Inline CSS and JavaScript, Canvas, animation, and event handlers are supported inside the secure preview iframe. Use once for the first design or for a broad rewrite; keep normal drafts under 12 KiB. It must include doctype, html, head, and body; keep scripts inline; use only asset sources allowed by the instructions, including Google Fonts stylesheet links when enabled. Plain <a href="https://..."> links open in a new tab. Do not add HTML comments, other external assets, forms, scripted navigation, or nested frames. Use edit_design instead for localized follow-ups.',
     inputSchema: {
       type: 'object',
       properties: {
