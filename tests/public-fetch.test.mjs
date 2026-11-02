@@ -53,7 +53,7 @@ test('connections pin DNS, preserve Host, and validate every redirect before con
 
 test('public redirect chains succeed and loops stop after five hops', async (t) => {
   let requests = transport(t, [{ statusCode: 302, headers: { location: '/next' }, chunks: [] }, { statusCode: 200, headers: {}, chunks: [Buffer.from('hello')] }])
-  assert.deepEqual(await fetchPublicText('http://example.com', new AbortController().signal), { status: 200, url: 'http://example.com/next', raw: 'hello' })
+  assert.deepEqual(await fetchPublicText('http://example.com', new AbortController().signal), { status: 200, url: 'http://example.com/next', raw: 'hello', contentType: undefined })
   assert.equal(requests.length, 2)
   t.mock.restoreAll()
   requests = transport(t, Array.from({ length: 6 }, () => ({ statusCode: 302, headers: { location: '/loop' }, chunks: [] })))
@@ -108,4 +108,33 @@ test('web_fetch refuses private destinations without opening a connection', asyn
 test('web_fetch still reads public pages as text', async (t) => {
   transport(t, [{ statusCode: 200, headers: {}, chunks: [Buffer.from('<html><head><style>p{}</style></head><body><p>Hello <b>there</b></p><script>x()</script></body></html>')] }])
   assert.deepEqual(await webFetch()('http://example.com/page'), { status: 200, url: 'http://example.com/page', content: 'Hello there' })
+  t.mock.restoreAll()
+  transport(t, [{ statusCode: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, chunks: [Buffer.from('<p>Hi <svg><path d="M0 0"/></svg></p>')] }])
+  assert.equal((await webFetch()('http://example.com/page')).content, 'Hi')
+})
+
+test('web_fetch returns SVG, XML, JSON and CSS as is, so their markup is not lost', async (t) => {
+  const svg = '<svg viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><path d="m1 1h8"/></svg>'
+  for (const [headers, body] of [
+    [{ 'content-type': 'image/svg+xml' }, svg],
+    [{}, svg],
+    [{}, `<?xml version="1.0"?>\n${svg}`],
+    [{ 'content-type': 'application/json' }, '{"a":"<b>"}'],
+    [{ 'content-type': 'text/css' }, 'a::before{content:"<i>"}'],
+    [{ 'content-type': 'application/ld+json' }, '{"@type":"<Org>"}'],
+  ]) {
+    transport(t, [{ statusCode: 200, headers, chunks: [Buffer.from(body)] }])
+    assert.deepEqual(await webFetch()('http://example.com/logo.svg'), { status: 200, url: 'http://example.com/logo.svg', content: body }, body)
+    t.mock.restoreAll()
+  }
+})
+
+test('web_fetch refuses binary responses instead of returning their bytes as text', async (t) => {
+  for (const type of ['image/png', 'application/pdf', 'font/woff2', 'application/octet-stream']) {
+    transport(t, [{ statusCode: 200, headers: { 'content-type': type }, chunks: [Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff])] }])
+    assert.deepEqual(await webFetch()('http://example.com/file'), {
+      error: `not a text response (${type}); web_fetch reads pages and text files such as SVG, JSON or CSS`,
+    }, type)
+    t.mock.restoreAll()
+  }
 })

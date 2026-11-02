@@ -36,6 +36,15 @@ export interface AskQuestion {
   options: { label: string; description?: string }[]
 }
 
+// Text formats web_fetch returns; images, PDFs, fonts and other binaries would only fill the context.
+const TEXT_TYPE = /^(?:text\/|image\/svg\+xml|application\/(?:[\w.-]+\+)?(?:json|xml|javascript|ecmascript)\b)/i
+
+/** A response read as a page. Without a content type, anything but an SVG or XML document. */
+function isHtml(contentType: string | undefined, raw: string): boolean {
+  if (contentType) return /\b(?:text\/html|application\/xhtml\+xml)\b/i.test(contentType)
+  return !/^\s*(?:<\?xml|<svg[\s>])/i.test(raw)
+}
+
 export function tail(text: string | undefined | null, max = MAX_TOOL_OUTPUT): string {
   if (!text) return ''
   if (text.length <= max) return text
@@ -170,7 +179,7 @@ export function createTools(host: ToolHost, opts: { allowSubagent?: boolean } = 
   const webFetch: FxHostTool = {
     name: 'web_fetch',
     description:
-      'Fetch a public http(s) URL and return its text content (scripts/styles stripped, truncated). Use for reading docs and pages.',
+      'Fetch a public http(s) URL and return its text content, truncated. HTML pages come back as text with tags, scripts and styles stripped; SVG, XML, JSON, CSS and other text come back as is, so an SVG logo can be placed inline. Use for reading docs, pages and assets.',
     inputSchema: {
       type: 'object',
       properties: { url: { type: 'string', description: 'Public http(s) URL to fetch.' } },
@@ -185,9 +194,14 @@ export function createTools(host: ToolHost, opts: { allowSubagent?: boolean } = 
       try {
         // One 20s budget covers DNS, every redirect and the body, so a slow server
         // can't trickle-hang the turn.
-        const { status, url, raw } = await fetchPublicText(input.url,
+        const { status, url, raw, contentType } = await fetchPublicText(input.url,
           AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
-        const text = raw
+        if (contentType && !TEXT_TYPE.test(contentType.trim())) {
+          host.log('tool:web_fetch:not-text', { ms: Date.now() - t0, status, contentType: contentType.slice(0, 80) })
+          return { error: `not a text response (${contentType.slice(0, 80)}); web_fetch reads pages and text files such as SVG, JSON or CSS` }
+        }
+        // Only a page is reduced to its text: in SVG, XML, JSON or CSS the markup is the content.
+        const text = !isHtml(contentType, raw) ? raw : raw
           .replace(/<script[\s\S]*?<\/script>/gi, ' ')
           .replace(/<style[\s\S]*?<\/style>/gi, ' ')
           .replace(/<[^>]+>/g, ' ')
