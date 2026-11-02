@@ -1,5 +1,5 @@
 import { ARTIFACT_IMAGE_PATH, artifactImageSrc } from '../../../lib/artifact-image'
-import { DESIGN_ARTIFACT_EMBEDDED_CSP, designFrameCsp, designFrameHtml, normalizeDesignArtifactHtml, prepareDesignArtifactHtml, remoteImagesEnabled } from '../../../lib/design-artifact'
+import { DESIGN_ARTIFACT_EMBEDDED_CSP, designFrameCsp, designFrameHtml, googleFontStylesheets, normalizeDesignArtifactHtml, prepareDesignArtifactHtml, remoteImagesEnabled } from '../../../lib/design-artifact'
 import { DESIGN_CAPTURE_RELAY, designCaptureScript } from '../../../lib/design-capture'
 import { embedGoogleFonts } from '../../../lib/google-fonts'
 import { PREVIEW_PROTOCOL, type PreviewPayload } from '../../../lib/preview-update'
@@ -36,7 +36,10 @@ const serveFrame = withSessionRoute(async (request, { id: sessionId, user }) => 
       status: 404, headers: { 'cache-control': 'private, no-store' },
     })
   }
-  const cacheable = live?.html != null && Number.isSafeInteger(version) && version > 0 && version === live.revision
+  // Font resolution can recover or change without a new source revision. A revision-only
+  // validator would freeze a fallback (and bypass retries), so keep these responses no-store.
+  const hasFonts = artifact != null && googleFontStylesheets(artifact).length > 0
+  const cacheable = !hasFonts && live?.html != null && Number.isSafeInteger(version) && version > 0 && version === live.revision
   const etag = cacheable ? `"${sessionId}:${live.revision}"` : null
   if (!json && etag && request.headers.get('if-none-match') === etag) {
     return new Response(null, { status: 304, headers: { 'cache-control': 'private, no-cache', etag } })

@@ -70,6 +70,25 @@ test('embedding takes every reference out without moving an element, and puts th
   assert.equal(inlineGoogleFonts(plain, '@font-face{}'), plain)
 })
 
+test('font faces never inherit a conditional, disabled, alternate or non-CSS style', () => {
+  const faces = '@font-face{font-family:Test}'
+  for (const attrs of ['media="print"', 'media="(min-width:99999px)"', 'type="text/plain"', 'disabled', 'title="alternate"']) {
+    const restricted = `<style ${attrs}>p{color:red}</style>`
+    const normal = '<style>body{color:black}</style>'
+    const html = doc('<p>x</p>', `<link rel="stylesheet" href="${INTER}">${restricted}${normal}`)
+    const out = inlineGoogleFonts(html, faces)
+    assert.ok(out.includes(restricted), attrs)
+    assert.ok(out.includes(`<style>${faces}body{color:black}</style>`), attrs)
+    assert.deepEqual(tags(out), tags(html), 'reuse an eligible style without changing DOM shape')
+
+    const only = inlineGoogleFonts(doc('<p>x</p>', `<link rel="stylesheet" href="${INTER}">${restricted}`), faces)
+    assert.ok(only.includes(`<head><style>${faces}</style>`), 'no eligible style: add an unconditional one')
+    assert.ok(only.includes(restricted), attrs)
+  }
+  const all = inlineGoogleFonts(doc('', `<link rel="stylesheet" href="${INTER}"><style media="all" type="text/css">p{}</style>`), faces)
+  assert.ok(all.includes(`<style media="all" type="text/css">${faces}p{}</style>`))
+})
+
 test("Google's stylesheet becomes Latin faces fx0 wrote, each file embedded once", async () => {
   const loaded = []
   const css = await compileGoogleFontCss(GOOGLE_CSS, async (url) => { loaded.push(url); return WOFF2 })

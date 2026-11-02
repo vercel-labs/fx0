@@ -651,7 +651,12 @@ function googleFontReferences(html: string) {
       edits.push({ ...href, text: '""' })
     }
     if (tag.content) {
-      firstStyle ??= tag.content
+      const media = decodeAttribute(tag.attributes.get('media') ?? '').trim().toLowerCase()
+      const type = decodeAttribute(tag.attributes.get('type') ?? '').trim().toLowerCase()
+      // Font faces must remain available on screen, in captures and in exported files.
+      if ((!media || media === 'all') && (!type || type === 'text/css') && !tag.attributes.has('disabled') && !tag.attributes.has('title')) {
+        firstStyle ??= tag.content
+      }
       const css = html.slice(tag.content.start, tag.content.end)
       for (const match of css.matchAll(GOOGLE_FONTS_IMPORT)) {
         const url = googleFontsStylesheetUrl(match[2] ?? match[4])
@@ -670,8 +675,9 @@ export function googleFontStylesheets(html: string): string[] {
 }
 
 // A prepared copy without its Google Fonts references, with `css` (their embedded faces,
-// from lib/google-fonts.ts) first in the design's first <style>, or in a new one at the
-// top of <head> when it has none.
+// from lib/google-fonts.ts) in the first unconditional CSS <style>, or a new one at
+// the top of <head> when none is suitable. A new element may require a full preview
+// reload instead of a hot update; never weaken the authored style's restrictions.
 export function inlineGoogleFonts(html: string, css: string): string {
   const { urls, edits, firstStyle, headEnd } = googleFontReferences(html)
   // The faces are fx0's own serialization; anything that could close the element is dropped.

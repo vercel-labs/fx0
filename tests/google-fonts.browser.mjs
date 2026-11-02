@@ -19,7 +19,8 @@ test('Google Fonts load and appear in captures after hot edits, history reload a
   assert.ok(existsSync(CHROME), `Chrome not found at ${CHROME}`)
   const font = await readFile(new globalThis.URL('./fixtures/fonts/playfair-display-latin-variable.woff2', import.meta.url))
   const css = await compileGoogleFontCss(`/* latin */ @font-face {font-family:'Playfair Display';font-style:normal;font-weight:400 900;src:url(https://fonts.gstatic.com/s/playfair/v1/latin.woff2) format('woff2');}`, async () => font)
-  const source = (revision) => `<!doctype html><html><head><link rel="stylesheet" href="${URL}"><style>html,body{margin:0;background:#fff}body{padding:40px}#probe{display:inline-block;font-family:'Playfair Display',monospace;font-weight:700;font-size:${revision === 2 ? 48 : 40}px;line-height:1.5;color:#000}</style></head><body><span id="probe">${TEXT}</span><script>
+  const probeStyle = (revision) => `display:inline-block;font-family:'Playfair Display',monospace;font-weight:700;font-size:${revision === 2 ? 48 : 40}px;line-height:1.5;color:#000`
+  const source = (revision) => `<!doctype html><html><head><style media="print">body{color:red}</style><style type="text/plain">not CSS</style><link rel="stylesheet" href="${URL}"><style${revision === 3 ? ' media="print"' : ''}>html,body{margin:0;background:#fff}body{padding:40px}#probe{${probeStyle(revision)}}</style></head><body${revision === 3 ? ' style="margin:0;padding:40px;background:#fff"' : ''}><span id="probe"${revision === 3 ? ` style="${probeStyle(revision)}"` : ''}>${TEXT}</span><script>
 addEventListener('message',async event=>{
   if(event.data!=='measure-font')return;
   try {
@@ -32,7 +33,7 @@ addEventListener('message',async event=>{
 addEventListener('securitypolicyviolation',event=>top.postMessage({type:'font-csp',blocked:event.blockedURI},'*'));
 </script></body></html>`
   const payloads = new Map()
-  for (const revision of [1, 2]) {
+  for (const revision of [1, 2, 3]) {
     const html = source(revision)
     const checked = validateDesignArtifactHtml(html)
     assert.equal(checked.ok, true, checked.error)
@@ -40,7 +41,7 @@ addEventListener('securitypolicyviolation',event=>top.postMessage({type:'font-cs
     assert.doesNotMatch(renderHtml, /fonts\.googleapis\.com|fonts\.gstatic\.com/)
     payloads.set(revision, { protocol: 1, sessionId: 'font-test', revision, sourceHtml: html, renderHtml, images: [] })
   }
-  const exported = await embedGoogleFonts(source(1), async () => css)
+  const exported = await embedGoogleFonts(source(3), async () => css)
   const outPage = `<!doctype html><html><body><pre id="out">{}</pre><iframe id="preview" style="width:800px;height:400px"></iframe><script>
 const out={metrics:{},shots:{},violations:[]}, waits=[];
 const frame=document.getElementById('preview');
@@ -52,8 +53,8 @@ addEventListener('message',({data,source})=>{
   if(index>=0)waits.splice(index,1)[0].resolve(data);
 });
 const child=()=>frame.contentDocument.querySelector('#frame-root iframe');
-const open=async revision=>{
-  const ready=next((data,source)=>source===frame.contentWindow&&data?.type==='fx0-artifact-painted'&&data.updateReady);
+const open=async(revision,hot=true)=>{
+  const ready=next((data,source)=>source===frame.contentWindow&&data?.type==='fx0-artifact-painted'&&(!hot||data.updateReady));
   frame.src='/frame?rev='+revision;
   return bounded(ready,'preview');
 };
@@ -87,6 +88,8 @@ const shot=async name=>{
   out.metrics.edited=await measure(child());out.shots.edited=await shot('edited');
   await open(1);
   out.metrics.history=await measure(child());out.shots.history=await shot('history');
+  const conditional=await open(3,false);out.conditionalUpdateReady=conditional.updateReady;
+  out.metrics.conditional=await measure(child());out.shots.conditional=await shot('conditional');
   const download=await(await fetch('/export')).text();
   const saved=document.createElement('iframe'); saved.style.cssText='width:800px;height:400px';saved.setAttribute('sandbox','allow-scripts');document.body.append(saved);
   const loaded=new Promise(resolve=>saved.onload=resolve);saved.srcdoc=download;await bounded(loaded,'export');
@@ -130,6 +133,7 @@ const shot=async name=>{
     assert.equal(out.error, undefined, out.error)
     assert.equal(out.done, true)
     assert.equal(out.update.status, 'applied', JSON.stringify(out.update))
+    assert.equal(out.conditionalUpdateReady, false, 'an inserted font style safely uses reloads instead of hot updates')
     assert.deepEqual(out.violations, [])
     for (const [name, metrics] of Object.entries(out.metrics)) {
       assert.equal(metrics.viewport, 800, `${name}: compare at the same CSS viewport`)

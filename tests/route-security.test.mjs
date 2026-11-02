@@ -697,6 +697,32 @@ test('the browser keeps a preview only when its URL names the revision that is l
   assert.equal(missing.headers.get('cache-control'), 'private, no-store')
 })
 
+test('font previews retry after a transient failure even when the browser sends a revision-only ETag', async () => {
+  const html = '<!doctype html><html><head><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter"><style>p{font-family:Inter,sans-serif}</style></head><body><p>hi</p></body></html>'
+  const fontCss = '@font-face{font-family:RecoveredFont;src:url(data:font/woff2;base64,d09GMg==)}'
+  const s = reset({ liveHtml: html, liveRevision: 2, fontFailure: true, fontCss })
+  const load = (etag) => {
+    const req = request('artifact-frame', 'GET', `${own}&v=2`)
+    if (etag) req.headers.set('if-none-match', etag)
+    return routes['artifact-frame'].GET(req)
+  }
+  const fallback = await load()
+  assert.equal(fallback.status, 200)
+  assert.doesNotMatch(await fallback.text(), /font-family:RecoveredFont/)
+  const oldEtag = fallback.headers.get('etag') ?? `"${own}:2"`
+  s.fontFailure = false
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const recovered = await load(oldEtag)
+    assert.equal(recovered.status, 200, 'never return an early 304 before resolving fonts')
+    assert.match(await recovered.text(), /font-family:RecoveredFont/)
+    assert.equal(recovered.headers.get('etag'), null)
+    assert.equal(recovered.headers.get('cache-control'), 'private, no-store')
+  }
+  assert.equal(s.fontRequests.length, 3)
+  assert.equal(fallback.headers.get('etag'), null)
+  assert.equal(fallback.headers.get('cache-control'), 'private, no-store')
+})
+
 test('preview update data names the actual revision, never shares HTML validators, and contains no host bootstrap', async () => {
   const state = reset({ liveRevision: 4 })
   const req = request('artifact-frame', 'GET', `${own}&v=2&format=json`)
