@@ -1,5 +1,9 @@
 export const PREVIEW_PROTOCOL = 1
 export const PREVIEW_PREPARE_MS = 10_000
+// The Google Fonts CSS fx0 may embed in a rendered design (lib/google-fonts.ts), and so
+// the longest rendered design a preview accepts: twice the 512 KiB source, plus fonts.
+export const MAX_EMBEDDED_FONT_CSS_LENGTH = 768 * 1024
+export const MAX_RENDER_HTML_LENGTH = 1024 * 1024 + MAX_EMBEDDED_FONT_CSS_LENGTH
 
 // The HTTP status a failed preview frame reports (app/api/artifact-frame/route.ts).
 export function isPreviewErrorStatus(value: unknown): value is number {

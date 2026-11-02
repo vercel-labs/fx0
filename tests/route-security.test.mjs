@@ -108,7 +108,7 @@ const mocks = {
     export async function finishDesignAssetCleanup() {}
     export async function pendingDesignAssetCleanups() { globalThis.securityTest.trace.push('cleanup-retry'); return []; }
     export async function queueDesignAssetCleanup() {}
-    export async function readDesignArtifact(id) { record('artifact', id); return '<!doctype html><html><head><title>private design</title></head><body>private artifact</body></html>'; }
+    export async function readDesignArtifact(id) { const s = record('artifact', id); return s.liveHtml ?? '<!doctype html><html><head><title>private design</title></head><body>private artifact</body></html>'; }
     export async function readDesignArtifactAt(id) {
       const s = record('artifact', id);
       return { html: s.liveHtml ?? (s.liveRevision === 0 ? null : '<!doctype html><html><head><title>private design</title></head><body>private artifact</body></html>'), revision: s.liveRevision ?? 1 };
@@ -156,6 +156,12 @@ const mocks = {
   'components/chat-app.tsx': 'export default function ChatApp() {}',
   'lib/remote-image-cache.ts': `
     export async function cachedRemoteImage() { return 'data:image/png;base64,aW1hZ2U='; }
+    export async function cachedGoogleFontCss(url) {
+      const s = globalThis.securityTest;
+      (s.fontRequests ??= []).push(url);
+      if (s.fontFailure) throw new Error('font unavailable');
+      return s.fontCss ?? '@font-face{font-family:Test}';
+    }
   `,
 }
 registerHooks({
@@ -691,6 +697,32 @@ test('the browser keeps a preview only when its URL names the revision that is l
   assert.equal(missing.headers.get('cache-control'), 'private, no-store')
 })
 
+test('font previews retry after a transient failure even when the browser sends a revision-only ETag', async () => {
+  const html = '<!doctype html><html><head><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter"><style>p{font-family:Inter,sans-serif}</style></head><body><p>hi</p></body></html>'
+  const fontCss = '@font-face{font-family:RecoveredFont;src:url(data:font/woff2;base64,d09GMg==)}'
+  const s = reset({ liveHtml: html, liveRevision: 2, fontFailure: true, fontCss })
+  const load = (etag) => {
+    const req = request('artifact-frame', 'GET', `${own}&v=2`)
+    if (etag) req.headers.set('if-none-match', etag)
+    return routes['artifact-frame'].GET(req)
+  }
+  const fallback = await load()
+  assert.equal(fallback.status, 200)
+  assert.doesNotMatch(await fallback.text(), /font-family:RecoveredFont/)
+  const oldEtag = fallback.headers.get('etag') ?? `"${own}:2"`
+  s.fontFailure = false
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const recovered = await load(oldEtag)
+    assert.equal(recovered.status, 200, 'never return an early 304 before resolving fonts')
+    assert.match(await recovered.text(), /font-family:RecoveredFont/)
+    assert.equal(recovered.headers.get('etag'), null)
+    assert.equal(recovered.headers.get('cache-control'), 'private, no-store')
+  }
+  assert.equal(s.fontRequests.length, 3)
+  assert.equal(fallback.headers.get('etag'), null)
+  assert.equal(fallback.headers.get('cache-control'), 'private, no-store')
+})
+
 test('preview update data names the actual revision, never shares HTML validators, and contains no host bootstrap', async () => {
   const state = reset({ liveRevision: 4 })
   const req = request('artifact-frame', 'GET', `${own}&v=2&format=json`)
@@ -898,6 +930,50 @@ test('the design download is the stored HTML, served so this origin never render
   const missing = await routes.artifact.GET(request('artifact', 'GET', `${own}&revision=3`))
   assert.equal(missing.status, 404)
   assert.deepEqual(await missing.json(), { error: 'This version is not in the history.' })
+})
+
+test('live and historical exports embed the same font CSS as their previews without changing stored HTML', async () => {
+  const url = 'https://fonts.googleapis.com/css2?family=Inter&display=swap'
+  const html = `<!doctype html><html><head><link rel="stylesheet" href="${url}"><style>p{font-family:Inter,sans-serif}</style></head><body><p>Español: ¿cómo está el niño? English.</p></body></html>`
+  const fontCss = '@font-face{font-family:Inter;src:url(data:font/woff2;base64,d09GMg==)}'
+  for (const suffix of ['', '&revision=2']) {
+    const s = reset({ liveHtml: html, generationHtml: html, fontCss })
+    const preview = await routes['artifact-frame'].GET(request('artifact-frame', 'GET', `${own}${suffix}&format=json`))
+    assert.equal(preview.status, 200)
+    const payload = await preview.json()
+    const response = await routes.artifact.GET(request('artifact', 'GET', `${own}${suffix}`))
+    assert.equal(response.status, 200)
+    const exported = await response.text()
+    assert.equal(payload.sourceHtml, html, 'authored links remain editable')
+    assert.equal(exported, payload.renderHtml)
+    assert.ok(exported.includes(fontCss))
+    assert.doesNotMatch(exported, /fonts\.googleapis|fonts\.gstatic/)
+    assert.deepEqual(s.fontRequests, [url, url])
+    assert.equal(response.headers.get('content-type'), 'text/plain; charset=utf-8')
+  }
+})
+
+test('failed or disabled fonts leave the export with its fallback and no external font references', async () => {
+  const html = '<!doctype html><html><head><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter"><style>p{font-family:Inter,sans-serif}</style></head><body><p>hi</p></body></html>'
+  const failed = reset({ liveHtml: html, fontFailure: true })
+  let response = await routes.artifact.GET(request('artifact', 'GET', own))
+  assert.equal(response.status, 200)
+  let exported = await response.text()
+  assert.doesNotMatch(exported, /fonts\.googleapis|@font-face/)
+  assert.match(exported, /Inter,sans-serif/)
+  assert.equal(failed.fontRequests.length, 1)
+  const before = process.env.FX0_REMOTE_IMAGES
+  process.env.FX0_REMOTE_IMAGES = '0'
+  try {
+    const disabled = reset({ liveHtml: html })
+    response = await routes.artifact.GET(request('artifact', 'GET', own))
+    exported = await response.text()
+    assert.doesNotMatch(exported, /fonts\.googleapis|@font-face/)
+    assert.equal(disabled.fontRequests, undefined)
+  } finally {
+    if (before === undefined) delete process.env.FX0_REMOTE_IMAGES
+    else process.env.FX0_REMOTE_IMAGES = before
+  }
 })
 
 test('debug output cannot serialize credentials, even from journal events', async () => {
