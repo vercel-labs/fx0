@@ -430,10 +430,22 @@ test('attached images upload while libfx admits the prompt; the model gets their
   await new Promise((resolve) => setTimeout(resolve, 20))
   assert.equal(f.sent.length, 1, 'libfx has the prompt before the upload finished')
   assert.equal(f.sent[0].input[0].text, '[Ada] Use my logo\n\n[Attached images the design can show: Image #1 = fx0-asset:AbCdEfGhIjKlMnOpQrStUvWx]')
+  assert.match(f.sent[0].sessionOptions.instructions, /Attached images usually reach you downscaled, so never measure sizes in the pixels you see/)
   finishUpload()
   await submitted
   assert.ok(!f.events.some((item) => item.type === 'error'))
   assert.equal(f.calls.filter((call) => call[0] === 'cancel').length, 0)
+})
+
+test('the model is told an attached screenshot\'s real size, beside its reference', async (t) => {
+  const f = fixture(t)
+  const images = [{ type: 'image', mimeType: 'image/png', data: 'cG5n' }]
+  await runtime.submitPrompt(boundHost('sized-chat'), 'Ada', 'reimplement this exactly', undefined, images, undefined, undefined, undefined, undefined,
+    { handles: ['AbCdEfGhIjKlMnOpQrStUvWx'], stored: Promise.resolve() },
+    [{ width: 2048, height: 1280, source: { width: 2880, height: 1800, density: 2 } }])
+  assert.equal(f.sent[0].input[0].text, '[Ada] reimplement this exactly\n\n[Attached images the design can show: Image #1 = fx0-asset:AbCdEfGhIjKlMnOpQrStUvWx]'
+    + '\n\n[Image #1 is a 2880×1800 px screenshot at 2x, so a 1440×900 CSS px layout; you see it downscaled to 2048×1280.]')
+  assert.deepEqual(f.sent[0].input[1], images[0], 'the image part carries no extra fields')
 })
 
 test('if the upload fails after libfx admitted the prompt, the turn is cancelled with a visible error', async (t) => {

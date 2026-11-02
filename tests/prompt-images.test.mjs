@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { imageDimensions } from '../lib/image-sniff.ts'
-import { validatePromptImages, validatePromptPreviews } from '../lib/prompt-images.ts'
+import { describeImageSizes, validatePromptImages, validatePromptPreviews } from '../lib/prompt-images.ts'
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
 const GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
@@ -38,8 +38,39 @@ test('dimensions come from every supported header, including progressive JPEG an
 
 test('valid images pass unchanged', () => {
   const images = [image(PNG, 'image/png'), image(GIF, 'image/gif'), image(jpeg(0xc2, 1920, 1080), 'image/jpeg'), image(webpLossless(2048, 1365), 'image/webp')]
-  assert.deepEqual(validatePromptImages(images), { images })
-  assert.deepEqual(validatePromptImages(undefined), { images: [] })
+  assert.deepEqual(validatePromptImages(images), {
+    images,
+    sizes: [{ width: 1, height: 1 }, { width: 1, height: 1 }, { width: 1920, height: 1080 }, { width: 2048, height: 1365 }],
+  })
+  assert.deepEqual(validatePromptImages(undefined), { images: [], sizes: [] })
+})
+
+test('the original size and density are kept beside the image, and implausible ones are dropped', () => {
+  const sent = image(webpLossless(2048, 1280), 'image/webp')
+  const sizeOf = (source) => validatePromptImages([{ ...sent, source }])
+  const { images, sizes } = sizeOf({ width: 2880, height: 1800, density: 2 })
+  assert.deepEqual(images, [sent], 'the image itself goes to the model without the extra field')
+  assert.deepEqual(sizes, [{ width: 2048, height: 1280, source: { width: 2880, height: 1800, density: 2 } }])
+  assert.deepEqual(sizeOf({ width: 2880, height: 1800, density: 4 }).sizes[0].source, { width: 2880, height: 1800 }, 'only 2x and 3x')
+  for (const source of [
+    { width: 1000, height: 625 }, // smaller than what was sent
+    { width: 2880, height: 2880 }, // another shape
+    { width: 2880.5, height: 1800 },
+    { width: 40_000, height: 25_000 },
+    'big', null,
+  ]) assert.deepEqual(sizeOf(source).sizes, [{ width: 2048, height: 1280 }], JSON.stringify(source))
+})
+
+test('the model is told each image\'s real size, and nothing when none is known', () => {
+  assert.equal(describeImageSizes([
+    { width: 2048, height: 1280, source: { width: 2880, height: 1800, density: 2 } },
+    { width: 640, height: 480 },
+    { width: 1600, height: 1200, source: { width: 4000, height: 3000 } },
+    { width: 800, height: 600, source: { width: 800, height: 600 } },
+  ]), '\n\n[Image #1 is a 2880×1800 px screenshot at 2x, so a 1440×900 CSS px layout; you see it downscaled to 2048×1280. '
+    + 'Image #3 is 4000×3000 px originally; you see it downscaled to 1600×1200. Image #4 is 800×600 px originally.]')
+  assert.equal(describeImageSizes([{ width: 640, height: 480 }]), '')
+  assert.equal(describeImageSizes(), '')
 })
 
 test('anything malformed, mislabeled, oversized or unsupported is refused with the image it is about', () => {

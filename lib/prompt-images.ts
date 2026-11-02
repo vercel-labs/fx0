@@ -5,20 +5,50 @@ import { PROMPT_IMAGE_MAX_COUNT, PROMPT_IMAGE_TYPES, PROMPT_IMAGES_MAX_BASE64 } 
 
 export interface PromptImage { type: 'image'; data: string; mimeType: string }
 
+/** An image as the model gets it, and the file it came from when the composer said so. */
+export interface PromptImageSize { width: number; height: number; source?: { width: number; height: number; density?: 2 | 3 } }
+
 // libfx takes at most 3.75 MiB per image and drops one wider or taller than 8000 px.
 const MAX_IMAGE_BYTES = 3.75 * 1024 * 1024
 const MAX_SIDE = 8000
+// The composer refuses sources over 60 MP before drawing them.
+const MAX_SOURCE_SIDE = 20_000
+
+// The original file's size and pixel density, as the composer reports them. Advisory, so
+// anything implausible (smaller than what was sent, another shape) is dropped, not refused.
+function imageSource(value: unknown, sent: { width: number; height: number }): PromptImageSize['source'] {
+  if (!value || typeof value !== 'object') return undefined
+  const { width, height, density } = value as Record<string, unknown>
+  const side = (n: unknown): n is number => Number.isInteger(n) && (n as number) > 0 && (n as number) <= MAX_SOURCE_SIDE
+  if (!side(width) || !side(height) || width < sent.width || height < sent.height) return undefined
+  if (Math.abs(width / height - sent.width / sent.height) > 0.02 * (sent.width / sent.height)) return undefined
+  return { width, height, ...(density === 2 || density === 3 ? { density } : {}) }
+}
+
+/** What the model is told about the images' real size, since it sees them downscaled. */
+export function describeImageSizes(sizes: PromptImageSize[] = []): string {
+  const notes = sizes.flatMap(({ width, height, source }, index) => {
+    if (!source) return []
+    const original = source.density
+      ? `a ${source.width}×${source.height} px screenshot at ${source.density}x, so a ${Math.round(source.width / source.density)}×${Math.round(source.height / source.density)} CSS px layout`
+      : `${source.width}×${source.height} px originally`
+    const seen = source.width > width ? `; you see it downscaled to ${width}×${height}` : ''
+    return [`Image #${index + 1} is ${original}${seen}`]
+  })
+  return notes.length ? `\n\n[${notes.join('. ')}.]` : ''
+}
 
 /**
  * A prompt's images, or the reason they are refused. Each must be canonical base64 of
  * a PNG, JPEG, GIF or WebP whose bytes match its declared type and whose header gives
  * sane dimensions, so nothing malformed reaches the journal or the model.
  */
-export function validatePromptImages(value: unknown): { images: PromptImage[] } | { error: string } {
-  if (value == null) return { images: [] }
+export function validatePromptImages(value: unknown): { images: PromptImage[]; sizes: PromptImageSize[] } | { error: string } {
+  if (value == null) return { images: [], sizes: [] }
   if (!Array.isArray(value)) return { error: 'images must be a list' }
   if (value.length > PROMPT_IMAGE_MAX_COUNT) return { error: `prompt cannot contain more than ${PROMPT_IMAGE_MAX_COUNT} images` }
   const images: PromptImage[] = []
+  const sizes: PromptImageSize[] = []
   let total = 0
   for (const [index, image] of value.entries()) {
     const label = `image ${index + 1}`
@@ -36,8 +66,10 @@ export function validatePromptImages(value: unknown): { images: PromptImage[] } 
     if (!size || !size.width || !size.height) return { error: `${label} is damaged or truncated` }
     if (size.width > MAX_SIDE || size.height > MAX_SIDE) return { error: `${label} is larger than ${MAX_SIDE} px on a side` }
     images.push({ type: 'image', data: image.data, mimeType: image.mimeType })
+    const source = imageSource(image.source, size)
+    sizes.push({ width: size.width, height: size.height, ...(source ? { source } : {}) })
   }
-  return { images }
+  return { images, sizes }
 }
 
 const PREVIEW = /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/
