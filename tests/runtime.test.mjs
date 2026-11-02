@@ -391,6 +391,8 @@ test('the instructions make the agent screenshot its design when implementing or
   const { instructions } = f.sent[0].sessionOptions
   assert.match(instructions, /asks to implement, replicate, recreate, clone, or match a design, page, or site, whether from an attached image, a URL, or a description, or asks for an exact copy, verify before reporting: after publishing, call screenshot_design/)
   assert.match(instructions, /at the width the reference was made at when there is one/)
+  assert.match(instructions, /After an edit that changes size, alignment, spacing, layout, or cropping, including a fix the user asked for after looking, call screenshot_design after the edit/)
+  assert.match(instructions, /A screenshot taken before the edit does not verify it\./)
   const tool = f.agentOptions.tools.find((candidate) => candidate.name === 'screenshot_design')
   assert.match(tool.description, /asks to implement, replicate, or match a design, page, or site \(from an image, a URL, or a description\)/)
 })

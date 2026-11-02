@@ -7,6 +7,8 @@ import { CAPTURE_WIDTH, captureWidth } from './capture-protocol.ts'
 const MAX_TOOL_OUTPUT = 32 * 1024
 export const VERIFY_REMINDER =
   'If the user asked to implement, replicate, or match a design, page, or site, call screenshot_design now and compare it before replying.'
+export const EDIT_VERIFY_REMINDER =
+  'If this edit changed size, alignment, spacing, layout, or cropping, call screenshot_design now and check it before replying; a screenshot from before the edit does not verify it.'
 
 export interface ToolHost {
   /** Registers an invocation; returns its call id for result paging. */
@@ -132,7 +134,8 @@ export function createTools(host: ToolHost, opts: { allowSubagent?: boolean } = 
     async execute(input: { edits: { old_string: string; new_string: string }[] }) {
       host.reportInvocation('edit_design')
       const edits = Array.isArray(input?.edits) ? input.edits : []
-      return host.editDesign(edits.map((edit) => ({ oldString: edit.old_string, newString: edit.new_string })))
+      const result = await host.editDesign(edits.map((edit) => ({ oldString: edit.old_string, newString: edit.new_string })))
+      return result.ok && result.changed ? { ...result, next: EDIT_VERIFY_REMINDER } : result
     },
   }
 

@@ -25,7 +25,7 @@ import {
   upsertSession,
   waitingLabel,
 } from '../components/chat-state.ts'
-import { createTools, VERIFY_REMINDER } from '../lib/tools.ts'
+import { createTools, EDIT_VERIFY_REMINDER, VERIFY_REMINDER } from '../lib/tools.ts'
 import { featuredModels } from '../lib/featured-models.ts'
 import { designLinkUrl, MAX_DESIGN_LINK_LENGTH } from '../lib/design-link.ts'
 
@@ -113,6 +113,17 @@ test('a changed publish reminds the agent to screenshot before replying, and onl
   assert.deepEqual(await publish({ ok: true, revision: 1, changed: false }), { ok: true, revision: 1, changed: false })
   const rejected = { ok: false, reason: 'invalid', error: 'missing doctype' }
   assert.deepEqual(await publish(rejected), rejected)
+})
+
+test('a changed edit reminds the agent to screenshot after it, and only a changed one', async () => {
+  const edit = (result) => createTools({ ...toolHost(), editDesign: async () => result })
+    .find((tool) => tool.name === 'edit_design').execute({ edits: [{ old_string: 'a', new_string: 'b' }] })
+  assert.deepEqual(await edit({ ok: true, revision: 2, changed: true }), { ok: true, revision: 2, changed: true, next: EDIT_VERIFY_REMINDER })
+  assert.match(EDIT_VERIFY_REMINDER, /size, alignment, spacing, layout, or cropping, call screenshot_design now/)
+  assert.match(EDIT_VERIFY_REMINDER, /a screenshot from before the edit does not verify it/)
+  assert.deepEqual(await edit({ ok: true, revision: 2, changed: false }), { ok: true, revision: 2, changed: false })
+  const rejected = { ok: false, reason: 'invalid', error: 'old_string not found' }
+  assert.deepEqual(await edit(rejected), rejected)
 })
 
 test('design mode exposes only design and common host tools', async () => {
