@@ -36,8 +36,11 @@ export interface AskQuestion {
   options: { label: string; description?: string }[]
 }
 
+// Text formats web_fetch returns; images, PDFs, fonts and other binaries would only fill the context.
+const TEXT_TYPE = /^(?:text\/|image\/svg\+xml|application\/(?:[\w.-]+\+)?(?:json|xml|javascript|ecmascript)\b)/i
+
 /** A response read as a page. Without a content type, anything but an SVG or XML document. */
-export function isHtml(contentType: string | undefined, raw: string): boolean {
+function isHtml(contentType: string | undefined, raw: string): boolean {
   if (contentType) return /\b(?:text\/html|application\/xhtml\+xml)\b/i.test(contentType)
   return !/^\s*(?:<\?xml|<svg[\s>])/i.test(raw)
 }
@@ -193,6 +196,10 @@ export function createTools(host: ToolHost, opts: { allowSubagent?: boolean } = 
         // can't trickle-hang the turn.
         const { status, url, raw, contentType } = await fetchPublicText(input.url,
           AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
+        if (contentType && !TEXT_TYPE.test(contentType.trim())) {
+          host.log('tool:web_fetch:not-text', { ms: Date.now() - t0, status, contentType: contentType.slice(0, 80) })
+          return { error: `not a text response (${contentType.slice(0, 80)}); web_fetch reads pages and text files such as SVG, JSON or CSS` }
+        }
         // Only a page is reduced to its text: in SVG, XML, JSON or CSS the markup is the content.
         const text = !isHtml(contentType, raw) ? raw : raw
           .replace(/<script[\s\S]*?<\/script>/gi, ' ')

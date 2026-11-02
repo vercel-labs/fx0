@@ -121,9 +121,20 @@ test('web_fetch returns SVG, XML, JSON and CSS as is, so their markup is not los
     [{}, `<?xml version="1.0"?>\n${svg}`],
     [{ 'content-type': 'application/json' }, '{"a":"<b>"}'],
     [{ 'content-type': 'text/css' }, 'a::before{content:"<i>"}'],
+    [{ 'content-type': 'application/ld+json' }, '{"@type":"<Org>"}'],
   ]) {
     transport(t, [{ statusCode: 200, headers, chunks: [Buffer.from(body)] }])
     assert.deepEqual(await webFetch()('http://example.com/logo.svg'), { status: 200, url: 'http://example.com/logo.svg', content: body }, body)
+    t.mock.restoreAll()
+  }
+})
+
+test('web_fetch refuses binary responses instead of returning their bytes as text', async (t) => {
+  for (const type of ['image/png', 'application/pdf', 'font/woff2', 'application/octet-stream']) {
+    transport(t, [{ statusCode: 200, headers: { 'content-type': type }, chunks: [Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff])] }])
+    assert.deepEqual(await webFetch()('http://example.com/file'), {
+      error: `not a text response (${type}); web_fetch reads pages and text files such as SVG, JSON or CSS`,
+    }, type)
     t.mock.restoreAll()
   }
 })
