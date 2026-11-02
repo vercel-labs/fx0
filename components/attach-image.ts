@@ -1,4 +1,5 @@
 import { imageThumbnail } from './image-thumbnail'
+import type { ImageSource } from '../lib/image-source'
 
 export interface NormalizedImage {
   data: string
@@ -9,12 +10,10 @@ export interface NormalizedImage {
   source: ImageSource
 }
 
-export interface ImageSource { width: number; height: number; density?: 2 | 3 }
-
-// Retina captures are named for it (CleanShot "…@2x.png", Xcode "…@3x.png").
-export function imageSource(name: string, width: number, height: number): ImageSource {
-  const density = Number(/@([23])x\.[a-z0-9]+$/i.exec(name)?.[1])
-  return { width, height, ...(density === 2 || density === 3 ? { density } : {}) }
+// A filename supplies a density hint, not proof of a screenshot's CSS viewport.
+function imageSource(name: string, width: number, height: number): ImageSource {
+  const density = Number(/@([123])x\.[a-z0-9]+$/i.exec(name)?.[1])
+  return { width, height, ...(density === 1 || density === 2 || density === 3 ? { density } : {}) }
 }
 
 // What the composer sends for one attached image: at most 2048 px on a side, usually

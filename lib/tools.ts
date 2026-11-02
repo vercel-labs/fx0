@@ -151,7 +151,7 @@ export function createTools(host: ToolHost, opts: { allowSubagent?: boolean } = 
           type: 'integer',
           minimum: CAPTURE_WIDTH.min,
           maximum: CAPTURE_WIDTH.max,
-          description: 'Viewport width in CSS px. Set it to the width a reference was made at, so both show the same layout: a 2880-pixel-wide 2x screenshot is 1440. Without it, the width the user sees.',
+          description: 'Viewport width in CSS px, not image pixels. Set it when the reference viewport is known: a full-width 2880px capture at confirmed 2x represents 1440 CSS px. Do not infer 2x from image width alone, or treat a crop as a full viewport. Without it, use the visible preview width.',
         },
       },
       additionalProperties: false,

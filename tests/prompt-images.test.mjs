@@ -51,25 +51,34 @@ test('the original size and density are kept beside the image, and implausible o
   const { images, sizes } = sizeOf({ width: 2880, height: 1800, density: 2 })
   assert.deepEqual(images, [sent], 'the image itself goes to the model without the extra field')
   assert.deepEqual(sizes, [{ width: 2048, height: 1280, source: { width: 2880, height: 1800, density: 2 } }])
-  assert.deepEqual(sizeOf({ width: 2880, height: 1800, density: 4 }).sizes[0].source, { width: 2880, height: 1800 }, 'only 2x and 3x')
+  assert.deepEqual(sizeOf({ width: 2880, height: 1800, density: 4 }).sizes[0].source, { width: 2880, height: 1800 }, 'only 1x, 2x and 3x')
+  assert.deepEqual(sizeOf({ width: 2880, height: 1800, density: 1 }).sizes[0].source, { width: 2880, height: 1800, density: 1 })
   for (const source of [
     { width: 1000, height: 625 }, // smaller than what was sent
     { width: 2880, height: 2880 }, // another shape
     { width: 2880.5, height: 1800 },
     { width: 40_000, height: 25_000 },
+    { width: 16000, height: 10000 }, // same shape, beyond the composer's 60 MP cap
     'big', null,
   ]) assert.deepEqual(sizeOf(source).sizes, [{ width: 2048, height: 1280 }], JSON.stringify(source))
+
+  const tall = validatePromptImages([{ ...image(webpLossless(68, 2048), 'image/webp'), source: { width: 1000, height: 30000 } }])
+  assert.deepEqual(tall.sizes[0].source, { width: 1000, height: 30000 }, 'a tall crop survives rounding and need not be a full viewport')
 })
 
-test('the model is told each image\'s real size, and nothing when none is known', () => {
-  assert.equal(describeImageSizes([
+test('the size note separates original, transmitted, and inferred CSS dimensions', () => {
+  const note = describeImageSizes([
     { width: 2048, height: 1280, source: { width: 2880, height: 1800, density: 2 } },
     { width: 640, height: 480 },
     { width: 1600, height: 1200, source: { width: 4000, height: 3000 } },
-    { width: 800, height: 600, source: { width: 800, height: 600 } },
-  ]), '\n\n[Image #1 is a 2880×1800 px screenshot at 2x, so a 1440×900 CSS px layout; you see it downscaled to 2048×1280. '
-    + 'Image #3 is 4000×3000 px originally; you see it downscaled to 1600×1200. Image #4 is 800×600 px originally.]')
-  assert.equal(describeImageSizes([{ width: 640, height: 480 }]), '')
+    { width: 800, height: 600, source: { width: 800, height: 600, density: 1 } },
+  ])
+  assert.match(note, /Image #1: original 2880×1800 px; sent at 2048×1280 px/)
+  assert.match(note, /filename suggests 2x; at that scale the captured area is 1440×900 CSS px, not necessarily the full viewport/)
+  assert.match(note, /the model provider may resize it further/)
+  assert.match(note, /Image #2: sent at 640×480 px .*original size and capture density unknown/)
+  assert.match(note, /Image #3: original 4000×3000 px; sent at 1600×1200 px .*capture density unknown; original pixel dimensions alone do not determine CSS size/)
+  assert.match(note, /filename suggests 1x; at that scale the captured area is 800×600 CSS px/)
   assert.equal(describeImageSizes(), '')
 })
 
