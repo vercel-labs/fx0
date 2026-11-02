@@ -7,6 +7,8 @@ import { CAPTURE_WIDTH, captureWidth } from './capture-protocol.ts'
 const MAX_TOOL_OUTPUT = 32 * 1024
 export const VERIFY_REMINDER =
   'If the user asked to implement, replicate, or match a design, page, or site, call screenshot_design now and compare it before replying.'
+export const EDIT_VERIFY_REMINDER =
+  'If this edit changed size, alignment, spacing, layout, or cropping, call screenshot_design now and check it before replying; a screenshot from before the edit does not verify it.'
 
 export interface ToolHost {
   /** Registers an invocation; returns its call id for result paging. */
@@ -34,6 +36,15 @@ export interface ToolHost {
 export interface AskQuestion {
   question: string
   options: { label: string; description?: string }[]
+}
+
+// Text formats web_fetch returns; images, PDFs, fonts and other binaries would only fill the context.
+const TEXT_TYPE = /^(?:text\/|image\/svg\+xml|application\/(?:[\w.-]+\+)?(?:json|xml|javascript|ecmascript)\b)/i
+
+/** A response read as a page. Without a content type, anything but an SVG or XML document. */
+function isHtml(contentType: string | undefined, raw: string): boolean {
+  if (contentType) return /\b(?:text\/html|application\/xhtml\+xml)\b/i.test(contentType)
+  return !/^\s*(?:<\?xml|<svg[\s>])/i.test(raw)
 }
 
 export function tail(text: string | undefined | null, max = MAX_TOOL_OUTPUT): string {
@@ -123,7 +134,8 @@ export function createTools(host: ToolHost, opts: { allowSubagent?: boolean } = 
     async execute(input: { edits: { old_string: string; new_string: string }[] }) {
       host.reportInvocation('edit_design')
       const edits = Array.isArray(input?.edits) ? input.edits : []
-      return host.editDesign(edits.map((edit) => ({ oldString: edit.old_string, newString: edit.new_string })))
+      const result = await host.editDesign(edits.map((edit) => ({ oldString: edit.old_string, newString: edit.new_string })))
+      return result.ok && result.changed ? { ...result, next: EDIT_VERIFY_REMINDER } : result
     },
   }
 
@@ -139,7 +151,7 @@ export function createTools(host: ToolHost, opts: { allowSubagent?: boolean } = 
           type: 'integer',
           minimum: CAPTURE_WIDTH.min,
           maximum: CAPTURE_WIDTH.max,
-          description: 'Viewport width in CSS px. Set it to the width a reference was made at, so both show the same layout: a 2880-pixel-wide 2x screenshot is 1440. Without it, the width the user sees.',
+          description: 'Viewport width in CSS px, not image pixels. Set it when the reference viewport is known: a full-width 2880px capture at confirmed 2x represents 1440 CSS px. Do not infer 2x from image width alone, or treat a crop as a full viewport. Without it, use the visible preview width.',
         },
       },
       additionalProperties: false,
@@ -170,7 +182,7 @@ export function createTools(host: ToolHost, opts: { allowSubagent?: boolean } = 
   const webFetch: FxHostTool = {
     name: 'web_fetch',
     description:
-      'Fetch a public http(s) URL and return its text content (scripts/styles stripped, truncated). Use for reading docs and pages.',
+      'Fetch a public http(s) URL and return its text content, truncated. HTML pages come back as text with tags, scripts and styles stripped; SVG, XML, JSON, CSS and other text come back as is, so an SVG logo can be placed inline. Use for reading docs, pages and assets.',
     inputSchema: {
       type: 'object',
       properties: { url: { type: 'string', description: 'Public http(s) URL to fetch.' } },
@@ -185,9 +197,14 @@ export function createTools(host: ToolHost, opts: { allowSubagent?: boolean } = 
       try {
         // One 20s budget covers DNS, every redirect and the body, so a slow server
         // can't trickle-hang the turn.
-        const { status, url, raw } = await fetchPublicText(input.url,
+        const { status, url, raw, contentType } = await fetchPublicText(input.url,
           AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
-        const text = raw
+        if (contentType && !TEXT_TYPE.test(contentType.trim())) {
+          host.log('tool:web_fetch:not-text', { ms: Date.now() - t0, status, contentType: contentType.slice(0, 80) })
+          return { error: `not a text response (${contentType.slice(0, 80)}); web_fetch reads pages and text files such as SVG, JSON or CSS` }
+        }
+        // Only a page is reduced to its text: in SVG, XML, JSON or CSS the markup is the content.
+        const text = !isHtml(contentType, raw) ? raw : raw
           .replace(/<script[\s\S]*?<\/script>/gi, ' ')
           .replace(/<style[\s\S]*?<\/style>/gi, ' ')
           .replace(/<[^>]+>/g, ' ')

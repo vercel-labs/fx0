@@ -1,5 +1,6 @@
 import { checkDesignMdUpload, DESIGN_MD_CATALOG, DESIGN_MD_MAX_BYTES } from '../lib/design-md'
 import { PROMPT_TEXT_MAX_BYTES } from '../lib/prompt-limits'
+import { parseImageSource } from '../lib/image-source'
 import type { AttachedImage, DesignMdPick } from './composer'
 
 export interface GuestDraft {
@@ -35,12 +36,13 @@ export function parseGuestDraft(raw: string, now = Date.now()): GuestDraft | nul
     let imageBytes = 0
     const images: AttachedImage[] = []
     for (const image of value.images) {
-      if (!image || typeof image !== 'object' || !exactKeys(image, ['data', 'mimeType'])) return null
+      if (!image || typeof image !== 'object' || !(exactKeys(image, ['data', 'mimeType']) || exactKeys(image, ['data', 'mimeType', 'source']))) return null
       if (typeof image.data !== 'string' || typeof image.mimeType !== 'string' || !/^image\/[a-z0-9.+-]{1,64}$/.test(image.mimeType)) return null
       if (!image.data || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.data) || image.data.length % 4 !== 0) return null
       imageBytes += image.data.length
       if (imageBytes > IMAGE_CAP) return null
-      images.push({ ...image, preview: `data:${image.mimeType};base64,${image.data}` })
+      const source = parseImageSource(image.source)
+      images.push({ data: image.data, mimeType: image.mimeType, preview: `data:${image.mimeType};base64,${image.data}`, ...(source ? { source } : {}) })
     }
     return { text: value.text, images, designMd, submit: value.submit }
   } catch {
@@ -71,7 +73,7 @@ export function saveGuestDraft(storage: DraftStorage, draft: GuestDraft, now = D
     storage.removeItem(GUEST_DRAFT_KEY)
     const raw = JSON.stringify({
       version: 2, expiresAt: now + GUEST_DRAFT_TTL, text: draft.text,
-      images: draft.images.map(({ data, mimeType }) => ({ data, mimeType })),
+      images: draft.images.map(({ data, mimeType, source }) => ({ data, mimeType, source: parseImageSource(source) })),
       designMd: draft.designMd ?? null, submit: draft.submit ?? false,
     })
     if (!parseGuestDraft(raw, now)) return false

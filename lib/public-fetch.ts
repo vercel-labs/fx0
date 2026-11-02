@@ -50,8 +50,8 @@ export const MAX_IMAGE_FETCH_BYTES = 1.25 * 1024 * 1024
 interface FetchOptions { maxBytes: number; httpsOnly?: boolean; accept?: string; userAgent?: string }
 
 export async function fetchPublicText(input: string, signal: AbortSignal) {
-  const { status, url, body } = await fetchPublic(input, signal, { maxBytes: MAX_FETCH_BYTES })
-  return { status, url, raw: body.toString('utf8') }
+  const { status, url, body, contentType } = await fetchPublic(input, signal, { maxBytes: MAX_FETCH_BYTES })
+  return { status, url, raw: body.toString('utf8'), contentType }
 }
 
 export async function fetchPublicImage(input: string, signal: AbortSignal) {
@@ -133,7 +133,7 @@ async function fetchPublic(input: string, signal: AbortSignal, options: FetchOpt
         if (bytes > options.maxBytes) throw new Error('Response too large')
         chunks.push(Buffer.from(chunk))
       }
-      return { status, url: url.href, body: Buffer.concat(chunks, bytes) }
+      return { status, url: url.href, body: Buffer.concat(chunks, bytes), contentType: response.headers['content-type'] }
     } finally {
       signal.removeEventListener('abort', abortBody)
       response.destroy()

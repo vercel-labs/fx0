@@ -4,7 +4,7 @@ import test from 'node:test'
 
 // guest-draft.ts imports lib/design-md without an extension, as Next resolves it.
 registerHooks({ resolve(specifier, context, next) {
-  if (specifier === '../lib/design-md' || specifier === '../lib/prompt-limits') return next(`${specifier}.ts`, context)
+  if (specifier === '../lib/design-md' || specifier === '../lib/prompt-limits' || specifier === '../lib/image-source') return next(`${specifier}.ts`, context)
   return next(specifier, context)
 } })
 const { GUEST_DRAFT_KEY, GUEST_DRAFT_TTL, GUEST_DRAFT_MAX_BYTES, saveGuestDraft, takeGuestDraft, parseGuestDraft, clearGuestDraft } = await import('../components/guest-draft.ts')
@@ -26,6 +26,29 @@ test('OAuth draft contains only unsent text and image bytes, restores once and e
   saveGuestDraft(store, draft, 100)
   assert.equal(takeGuestDraft(store, 100 + GUEST_DRAFT_TTL), null)
   assert.equal(store.values.size, 0)
+})
+
+test('sign-in preserves original dimensions and density hints, including nameless pasted images', () => {
+  for (const source of [{ width: 2880, height: 1800, density: 2 }, { width: 2880, height: 1800 }, { width: 1440, height: 900, density: 1 }]) {
+    const store = storage()
+    const pending = { ...draft, images: [{ ...image, source }], submit: true }
+    assert.equal(saveGuestDraft(store, pending, 100), true)
+    assert.deepEqual(takeGuestDraft(store, 101), { ...pending, designMd: null })
+    assert.equal(takeGuestDraft(store, 102), null)
+  }
+})
+
+test('draft source metadata is bounded and only numeric fields are stored', () => {
+  const store = storage()
+  for (const source of [{ width: -1, height: 1800 }, { width: 10000, height: 10000 }, { width: '2880', height: 1800 }, null]) {
+    assert.equal(saveGuestDraft(store, { ...draft, images: [{ ...image, source }] }, 100), true)
+    assert.equal(takeGuestDraft(store, 101).images[0].source, undefined)
+  }
+  const source = { width: 2880, height: 1800, density: 2, token: 'must-not-persist', filename: 'private.png' }
+  assert.equal(saveGuestDraft(store, { ...draft, images: [{ ...image, source }] }, 100), true)
+  const raw = store.getItem(GUEST_DRAFT_KEY)
+  assert.doesNotMatch(raw, /must-not-persist|private.png/)
+  assert.deepEqual(takeGuestDraft(store, 101).images[0].source, { width: 2880, height: 1800, density: 2 })
 })
 
 test('invalid shapes, credential fields, unsafe previews, timestamps and oversized bytes are rejected', () => {

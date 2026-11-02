@@ -6,6 +6,7 @@ import { AuthRouteError, fetchUi } from './auth-ui'
 import { IconFileText } from './geist-icons'
 import ImagePreview from './image-preview'
 import { normalizeImage } from './attach-image'
+import type { ImageSource } from '../lib/image-source'
 import { Button } from './ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 import { checkDesignMdUpload, DESIGN_MD_CATALOG, DESIGN_MD_MAX_BYTES } from '../lib/design-md'
@@ -36,6 +37,8 @@ export interface AttachedImage {
   preview: string
   // Made when the image is attached; missing for one restored from a guest draft.
   thumbnail?: string | null
+  // The original file's size, so the model can size a layout from a downscaled image.
+  source?: ImageSource
 }
 
 // A new chat's DESIGN.md: a catalog file by id, or an uploaded file's text.

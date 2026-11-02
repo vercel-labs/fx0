@@ -1408,7 +1408,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
           text: value,
           clientId,
           afterSeq,
-          images: images.length ? images.map(({ data, mimeType }) => ({ type: 'image', data, mimeType })) : undefined,
+          images: images.length ? images.map(({ data, mimeType, source }) => ({ type: 'image', data, mimeType, source })) : undefined,
           previews: previews.length ? previews : undefined,
           generation: firstGeneration
             ? { model: firstGeneration.model || null, effort: firstGeneration.effort || null, fast: firstGeneration.fast }
