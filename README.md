@@ -210,6 +210,8 @@ Compare a response's `preparedRt` with later requests' `rt`. A matching `prepare
 
 `purpose` and `secPurpose` contain only recognized directives; `prerender: null` means unknown. Native navigation and iframe requests may have no UI page context. No plaintext tokens, cookies, authorization headers, query strings or exception details are logged.
 
+Pending publication binds both the prior sealed state and the token consumed by the exchange, so a differently sealed predecessor can be repaired without replaying it. The token commitment stays inside the encrypted pending cookie and is not logged. Older pending cookies lack that commitment: exact-state repair and an already-published successor still work, but ambiguous state changes return `503` with the pending credential preserved. Such older ambiguous grants may require signing in again; a different seal alone does not prove a newer token.
+
 ## Safety
 
 Generated pages run in a sandboxed iframe on an opaque origin. They can't read the app's cookies, storage or credentials, and their Content Security Policy blocks network requests (`connect-src 'none'`). It's still the browser enforcing all of this, though, not a sealed VM.

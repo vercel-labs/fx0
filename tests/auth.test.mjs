@@ -672,6 +672,7 @@ for (const bootstrap of [true, false]) test(`publication outage preserves the on
   const preserved = await browserGrant(failed)
   assert.equal(preserved.grant.refreshToken, `outage-rt${used.length}`)
   assert.equal(preserved.grant.credentialPublication.previous, createHash('sha256').update(previous ?? '').digest('hex'))
+  assert.equal(preserved.grant.credentialPublication.previousToken, createHash('sha256').update(used.at(-1)).digest('hex'), 'bind the consumed durable token, not a stale incoming cookie')
   assert.equal(preserved.grant.credentialPublication.validUntil, Date.now() + 30 * 24 * 3600_000)
   assert.ok(Buffer.byteLength(preserved.cookie) < 4096)
   assert.doesNotMatch(preserved.cookie, /outage-rt|outage-access/)
@@ -724,6 +725,188 @@ for (const recovery of ['missing', 'winner', 'revoked']) test(`pending publicati
     assert.deepEqual(current, {})
     assert.match(repaired.headers.get('set-cookie'), /Max-Age=0/)
     assert.equal(used.length, 2)
+  }
+})
+
+test('pending successor survives a delayed bootstrap of its consumed predecessor with one-hour tokens', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 })
+  const trail = []
+  for (const level of ['info', 'error']) t.mock.method(console, level, (line) => trail.push(line))
+  const used = []
+  let live = 'late-bootstrap-seed'
+  let phase = 'seed'
+  let entered, release
+  const publishing = new Promise((resolve) => { entered = resolve })
+  const gate = new Promise((resolve) => { release = resolve })
+  mockRefreshNetwork(t, (options) => {
+    const token = options.body.get('refresh_token')
+    used.push(token)
+    if (token !== live) return Response.json({ error: 'invalid_grant' }, { status: 400 })
+    live = `late-bootstrap-rt${used.length - 1}`
+    return Response.json(tokenResponse({ refresh_token: live, expires_in: 3600 }))
+  }, async (options) => {
+    if (redisScript(options).includes('auth-credential:publish')) {
+      const command = JSON.parse(options.body)
+      const args = Array.isArray(command[0]) ? command[0] : command
+      const candidate = await unsealData(args[4 + Number(args[2])], { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 })
+      if (phase === 'first-outage' || (phase === 'second-outage' && candidate.refreshToken === 'late-bootstrap-rt2')) {
+        throw new Error('Synthetic publication outage')
+      }
+      if (phase === 'hold-bootstrap' && candidate.refreshToken === 'late-bootstrap-rt1') { entered(); await gate }
+    }
+    return redisRest(options)
+  })
+  const seeded = await requestSession(await requestWithSession('/api/prompt', session({ refreshToken: live })))
+  const original = (await browserGrant(seeded)).request
+  t.mock.timers.setTime(Date.now() + 2 * 3600_000)
+  phase = 'first-outage'
+  const first = await requestSession(original)
+  assert.equal(first.status, 503)
+  const pendingFirst = await browserGrant(first)
+  assert.equal(pendingFirst.grant.refreshToken, 'late-bootstrap-rt1')
+  redisValues.delete(latestCredentialKey())
+  phase = 'hold-bootstrap'
+  const delayed = requestSession(new NextRequest(original.url, { headers: original.headers }))
+  t.after(async () => { release(); await delayed })
+  await publishing
+  phase = 'second-outage'
+  const second = await requestSession(pendingFirst.request)
+  assert.equal(second.status, 503)
+  const pendingSecond = await browserGrant(second)
+  assert.equal(pendingSecond.grant.refreshToken, 'late-bootstrap-rt2')
+  phase = 'repair'
+  release()
+  await delayed
+  const predecessor = await unsealData(redisValues.get(latestCredentialKey()), { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 })
+  assert.equal(predecessor.refreshToken, 'late-bootstrap-rt1')
+  const repaired = await requestSession(pendingSecond.request)
+  assert.equal(repaired.status, 200)
+  assert.equal(handledRequests.get(repaired)?.session.refreshToken, 'late-bootstrap-rt2')
+  assert.equal((await browserGrant(repaired)).grant.credentialPublication, undefined)
+  const durable = await unsealData(redisValues.get(latestCredentialKey()), { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 })
+  assert.equal(durable.refreshToken, 'late-bootstrap-rt2')
+  assert.equal(redisExpirations.get(latestCredentialKey()), pendingSecond.grant.credentialPublication.validUntil)
+  assert.deepEqual(used, ['late-bootstrap-seed', 'late-bootstrap-rt0', 'late-bootstrap-rt1'])
+  assert.equal(trail.join('\n').includes(pendingSecond.grant.credentialPublication.previousToken), false, 'internal token commitments must not enter logs')
+})
+
+for (const race of ['stored', 'resealed', 'exhausted', 'winner', 'revoked']) test(`pending predecessor repair handles ${race} without losing its live successor`, async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 })
+  const used = []
+  let live = `repair-seed-${race}`
+  let failPublication = false
+  let interleave = false
+  let repairCalls = 0
+  let predecessor
+  mockRefreshNetwork(t, (options) => {
+    const token = options.body.get('refresh_token')
+    used.push(token)
+    if (token !== live) return Response.json({ error: 'invalid_grant' }, { status: 400 })
+    live = `repair-rt${used.length}`
+    return Response.json(tokenResponse({ refresh_token: live }))
+  }, async (options) => {
+    if (redisScript(options).includes('auth-credential:publish')) {
+      if (failPublication) throw new Error('Synthetic publication outage')
+      if (interleave) {
+        repairCalls++
+        if (race === 'exhausted' || (race === 'resealed' && repairCalls === 1)) {
+          redisValues.set(latestCredentialKey(), await sealData(predecessor, { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 }))
+        }
+        if (race === 'winner') {
+          redisValues.set(latestCredentialKey(), await sealData({ ...predecessor, refreshToken: 'repair-durable-winner', accessToken: 'winner-access', expiresAt: Date.now() + 3600_000 }, { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 }))
+        }
+        if (race === 'revoked') redisValues.set(revokedCredentialKey(), '1')
+      }
+    }
+    return redisRest(options)
+  })
+  const source = await requestWithSession('/api/prompt', session({ refreshToken: live }))
+  await requestSession(source)
+  const raw = redisValues.get(latestCredentialKey())
+  predecessor = await unsealData(raw, { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 })
+  t.mock.timers.setTime(Date.now() + 2 * 3600_000)
+  failPublication = true
+  const failed = await requestSession(source)
+  assert.equal(failed.status, 503)
+  const pending = await browserGrant(failed)
+  failPublication = false
+  const resealed = await sealData(predecessor, { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 })
+  assert.notEqual(resealed, raw)
+  redisValues.set(latestCredentialKey(), resealed)
+  t.mock.timers.setTime(Date.now() + 3 * 60_000)
+  interleave = true
+  const repaired = await requestSession(pending.request)
+  assert.equal(used.length, 2, 'retry must not exchange the already-spent durable predecessor')
+  if (race === 'exhausted') {
+    assert.equal(repairCalls, 2, 'CAS contention has a fixed retry bound')
+    assert.equal(repaired.status, 503)
+    assert.equal(handledRequests.has(repaired), false)
+    const preserved = await browserGrant(repaired)
+    assert.equal(preserved.grant.refreshToken, live)
+    assert.deepEqual(preserved.grant.credentialPublication, pending.grant.credentialPublication)
+    interleave = false
+    const later = await requestSession(preserved.request)
+    assert.equal(later.status, 200)
+    assert.equal(handledRequests.get(later).session.refreshToken, live)
+    assert.equal(redisExpirations.get(latestCredentialKey()), pending.grant.credentialPublication.validUntil)
+  } else if (race === 'revoked') {
+    assert.deepEqual(handledRequests.get(repaired).session, {})
+    assert.match(repaired.headers.get('set-cookie'), /Max-Age=0/)
+  } else {
+    const expected = race === 'winner' ? 'repair-durable-winner' : live
+    assert.equal(repaired.status, 200)
+    assert.equal(handledRequests.get(repaired).session.refreshToken, expected)
+    assert.equal((await browserGrant(repaired)).grant.credentialPublication, undefined)
+    assert.equal(repairCalls, race === 'resealed' ? 2 : 1)
+    const durable = await unsealData(redisValues.get(latestCredentialKey()), { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 })
+    assert.equal(durable.refreshToken, expected)
+    if (race !== 'winner') assert.equal(redisExpirations.get(latestCredentialKey()), pending.grant.credentialPublication.validUntil)
+  }
+})
+
+for (const recovery of ['exact', 'published', 'ambiguous', 'missing', 'invalid']) test(`legacy pending metadata handles ${recovery} without guessing which token is newer`, async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 })
+  const used = []
+  let failPublication = false
+  mockRefreshNetwork(t, (options) => {
+    used.push(options.body.get('refresh_token'))
+    return Response.json(tokenResponse({ refresh_token: `legacy-pending-rt${used.length}` }))
+  }, (options) => {
+    if (failPublication && redisScript(options).includes('auth-credential:publish')) throw new Error('Synthetic publication outage')
+    return redisRest(options)
+  })
+  const source = await requestWithSession('/api/prompt', session({ refreshToken: `legacy-pending-seed-${recovery}` }))
+  await requestSession(source)
+  const predecessor = await unsealData(redisValues.get(latestCredentialKey()), { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 })
+  t.mock.timers.setTime(Date.now() + 2 * 3600_000)
+  failPublication = true
+  const pending = await browserGrant(await requestSession(source))
+  failPublication = false
+  delete pending.grant.credentialPublication.previousToken
+  if (recovery === 'invalid') pending.grant.credentialPublication.previousToken = 'invalid-marker'
+  if (recovery === 'ambiguous') redisValues.set(latestCredentialKey(), await sealData(predecessor, { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 }))
+  if (recovery === 'missing') redisValues.delete(latestCredentialKey())
+  if (recovery === 'published') {
+    redisValues.set(latestCredentialKey(), await sealData({ ...predecessor, accessToken: pending.grant.accessToken, refreshToken: pending.grant.refreshToken, expiresAt: pending.grant.expiresAt, validUntil: pending.grant.credentialPublication.validUntil }, { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 }))
+  }
+  const before = redisValues.get(latestCredentialKey())
+  const request = await requestWithSession('/api/prompt', pending.grant)
+  const repaired = await requestSession(request)
+  assert.equal(used.length, 2)
+  if (recovery === 'exact' || recovery === 'published') {
+    assert.equal(repaired.status, 200)
+    assert.equal(handledRequests.get(repaired).session.refreshToken, pending.grant.refreshToken)
+    assert.equal((await browserGrant(repaired)).grant.credentialPublication, undefined)
+  } else {
+    assert.equal(repaired.status, 503)
+    assert.equal(handledRequests.has(repaired), false)
+    assert.equal(redisValues.get(latestCredentialKey()), before)
+    if (recovery === 'invalid') assert.equal(repaired.headers.get('set-cookie'), null)
+    else {
+      const preserved = await browserGrant(repaired)
+      assert.equal(preserved.grant.refreshToken, pending.grant.refreshToken)
+      assert.deepEqual(preserved.grant.credentialPublication, pending.grant.credentialPublication)
+    }
   }
 })
 

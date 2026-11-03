@@ -89,11 +89,26 @@ export async function renewSessionCredential(grant: SessionData, requestId: stri
   const pending = grant.credentialPublication
   let forceRefresh = false
   if (pending) {
-    if (!/^[a-f0-9]{64}$/.test(pending.previous) || !Number.isFinite(pending.validUntil) ||
-        pending.validUntil <= Date.now() || pending.validUntil > Date.now() + RETENTION_SECONDS * 1000) {
+    if (!/^[a-f0-9]{64}$/.test(pending.previous) ||
+        (pending.previousToken !== undefined && !/^[a-f0-9]{64}$/.test(pending.previousToken)) ||
+        !Number.isFinite(pending.validUntil) || pending.validUntil <= Date.now() ||
+        pending.validUntil > Date.now() + RETENTION_SECONDS * 1000) {
       throw new Error('Invalid pending credential publication')
     }
-    if (hashHandle(state.raw ?? '') === pending.previous) {
+    for (let attempt = 0; ; attempt++) {
+      const exactPredecessor = hashHandle(state.raw ?? '') === pending.previous
+      // A provider may keep the refresh token unchanged. Outside an exact raw
+      // match, an already-durable successor takes precedence over token identity.
+      const successorStored = state.credential?.refreshToken === grant.refreshToken
+      const consumedPredecessor = state.credential && pending.previousToken !== undefined &&
+        hashHandle(state.credential.refreshToken) === pending.previousToken
+      if (!exactPredecessor && (successorStored || !consumedPredecessor)) {
+        // Old markers cannot distinguish a resealed predecessor from another
+        // durable head. Preserve their successor until there is exact proof.
+        if (pending.previousToken === undefined && !successorStored) return { status: 'unavailable', session: grant }
+        break
+      }
+      if (attempt === 2) return { status: 'unavailable', session: grant }
       try {
         const saved = await publish(state.raw, grant, pending.validUntil)
         if (saved === -1) return { status: 'terminal' }
@@ -109,8 +124,8 @@ export async function renewSessionCredential(grant: SessionData, requestId: stri
       state = await latest()
       if (state === 'revoked') return { status: 'terminal' }
     }
-    // A different durable state wins. If the predecessor disappeared, prove
-    // the cookie's successor is still live with a fresh exchange before bootstrap.
+    // Keep the existing different-durable-head policy; it does not prove token
+    // ordering. A missing head with a new marker still requires a fresh exchange.
     forceRefresh = !state.credential
   }
   const current = state.credential ? apply(state.credential) : original
@@ -153,5 +168,5 @@ export async function renewSessionCredential(grant: SessionData, requestId: stri
     logAuth('auth:credential:publish_failed', { request: requestId, pending: false, rt: logTag('refresh', rotated.refreshToken!) }, 'error')
   }
   return { status: 'unavailable', session: { ...rotated,
-    credentialPublication: { previous: hashHandle(previous ?? ''), validUntil } } }
+    credentialPublication: { previous: hashHandle(previous ?? ''), previousToken: hashHandle(current.refreshToken!), validUntil } } }
 }
