@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { registerHooks } from 'node:module'
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { sealData, unsealData } from 'iron-session'
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from 'jose'
 import { NextRequest } from 'next/server.js'
@@ -41,6 +41,11 @@ process.env.APP_URL = 'https://fx0.example'
 process.env.KV_REST_API_URL = 'https://auth-redis.example'
 process.env.KV_REST_API_TOKEN = 'test-only-redis-token'
 
+const authCrypto = await import('../lib/auth-crypto.ts')
+const expectedLogTag = (kind, value, secret = process.env.SESSION_SECRET) => {
+  const key = createHmac('sha256', secret).update('fx0:auth-log-key:v1').digest()
+  return createHmac('sha256', key).update(kind).update('\0').update(value).digest('hex').slice(0, 24)
+}
 const protocol = await import('../lib/auth-protocol.ts')
 const secure = await import('../lib/secure-session.ts')
 const auth = await import('../lib/auth.ts')
@@ -124,6 +129,41 @@ function forwardedRequest(response, path = '/api/prompt') {
     cookie: handledRequests.get(response).request.headers.get('cookie') ?? '',
   } })
 }
+
+test('log fingerprints are 96-bit keyed tags separated by data kind, without changing storage hashes', (t) => {
+  const secret = process.env.SESSION_SECRET
+  t.after(() => { process.env.SESSION_SECRET = secret })
+  const value = 'synthetic-correlation-value'
+  const kinds = ['user', 'login', 'refresh', 'cookie', 'page']
+  const tags = kinds.map((kind) => authCrypto.logTag(kind, value))
+  assert.equal(new Set(tags).size, kinds.length, 'the same value cannot be linked across different data kinds')
+  for (const [index, kind] of kinds.entries()) {
+    assert.match(tags[index], /^[a-f0-9]{24}$/)
+    assert.equal(tags[index], expectedLogTag(kind, value))
+    assert.equal(authCrypto.logTag(kind, value), tags[index], 'correlation is deterministic with the same private key')
+  }
+  const publicHash = createHash('sha256').update(value).digest('hex')
+  assert.equal(authCrypto.hashHandle(value), publicHash)
+  assert.ok(!tags.includes(publicHash.slice(0, 24)), 'log tags cannot be calculated with an unkeyed public hash')
+  const directMasterMac = createHmac('sha256', secret).update('user\0' + value).digest('hex').slice(0, 24)
+  assert.notEqual(tags[0], directMasterMac, 'logging uses its own purpose-derived subkey')
+  process.env.SESSION_SECRET = 'another-synthetic-session-secret-at-least-32-characters'
+  assert.notEqual(authCrypto.logTag('user', value), tags[0], 'private-key rotation also changes log identifiers')
+  assert.equal(authCrypto.hashHandle(value), publicHash, 'key rotation must not change Redis or CAS fingerprints')
+})
+
+test('missing or invalid log key omits fingerprints without falling back to raw or unkeyed identifiers', (t) => {
+  const secret = process.env.SESSION_SECRET
+  t.after(() => { process.env.SESSION_SECRET = secret })
+  for (const unavailable of [undefined, '', 'too-short']) {
+    if (unavailable === undefined) delete process.env.SESSION_SECRET
+    else process.env.SESSION_SECRET = unavailable
+    for (const kind of ['user', 'login', 'refresh', 'cookie', 'page']) {
+      assert.equal(authCrypto.logTag(kind, 'do-not-log-this-value'), null)
+    }
+    assert.equal(authCrypto.hashHandle('storage-value'), createHash('sha256').update('storage-value').digest('hex'))
+  }
+})
 
 test('singleflight plus cross-instance lease performs one exchange and encrypts the 120s result', async () => {
   const store = refreshCache()
@@ -434,8 +474,12 @@ test('pages read no session from a signed-out login\'s grant', async (t) => {
 // In-memory REST endpoint exercises the REAL installed Redis adapter and request wrapper,
 // not a replacement request wrapper. The separate coordinator tests inject only its cache
 // and fetch boundary. No service credentials or remote requests are used.
+const encodeRedisResult = (value) => typeof value === 'string' && value !== 'OK' ? Buffer.from(value).toString('base64') : value
 const redisValues = new Map()
+const redisExpirations = new Map()
+test.beforeEach(() => { redisValues.clear(); redisExpirations.clear() })
 function redisRest(options) {
+  for (const [key, until] of redisExpirations) if (until <= Date.now()) { redisValues.delete(key); redisExpirations.delete(key) }
   const execute = (args) => {
     const [command, ...rest] = args
     const op = command.toUpperCase()
@@ -443,12 +487,24 @@ function redisRest(options) {
     if (op === 'SET') {
       if (rest.some((arg) => String(arg).toUpperCase() === 'NX') && redisValues.has(rest[0])) return null
       redisValues.set(rest[0], rest[1])
+      const ex = rest.findIndex((arg) => String(arg).toUpperCase() === 'EX')
+      if (ex >= 0) redisExpirations.set(rest[0], Date.now() + Number(rest[ex + 1]) * 1000)
       return 'OK'
     }
     if (op === 'EVAL') {
-      const [, numKeys, ...items] = rest
+      const [script, numKeys, ...items] = rest
       const keys = items.slice(0, Number(numKeys))
       const argv = items.slice(Number(numKeys))
+      if (script.includes('auth-credential:read')) {
+        return redisValues.has(keys[1]) ? -1 : redisValues.get(keys[0]) ?? null
+      }
+      if (script.includes('auth-credential:publish')) {
+        if (redisValues.has(keys[1])) return -1
+        if ((redisValues.get(keys[0]) ?? '') !== argv[0]) return 0
+        redisValues.set(keys[0], argv[1])
+        redisExpirations.set(keys[0], Date.now() + Number(argv[2]) * 1000)
+        return 1
+      }
       if (keys.length === 1) { // Lease release: compare-and-delete.
         if (redisValues.get(keys[0]) !== argv[0]) return 0
         redisValues.delete(keys[0])
@@ -458,6 +514,7 @@ function redisRest(options) {
       const [owner, value] = argv
       if (redisValues.get(lockKey) !== owner) return 0
       redisValues.set(resultKey, value)
+      redisExpirations.set(resultKey, Date.now() + Number(argv[2]) * 1000)
       redisValues.delete(lockKey)
       return 1
     }
@@ -465,20 +522,271 @@ function redisRest(options) {
   }
   const body = JSON.parse(options.body)
   return Response.json(Array.isArray(body[0])
-    ? body.map((args) => ({ result: execute(args) }))
-    : { result: execute(body) })
+    ? body.map((args) => ({ result: encodeRedisResult(execute(args)) }))
+    : { result: encodeRedisResult(execute(body)) })
 }
 
-function mockRefreshNetwork(t, response) {
+function mockRefreshNetwork(t, response, redis = redisRest) {
   let exchanges = 0
   t.mock.method(globalThis, 'fetch', async (url, options) => {
-    if (String(url).startsWith('https://auth-redis.example')) return redisRest(options)
+    if (String(url).startsWith('https://auth-redis.example')) return redis(options)
     assert.equal(String(url), protocol.TOKEN_ENDPOINT)
     exchanges++
-    return response()
+    return response(options)
   })
   return () => exchanges
 }
+
+test('an 18-hour stale cookie recovers after the coordinator result is cold across multiple rotations', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 })
+  const used = []
+  let current = 'incident-rt0'
+  mockRefreshNetwork(t, (options) => {
+    const token = options.body.get('refresh_token')
+    used.push(token)
+    if (token !== current) return Response.json({ error: 'invalid_grant' }, { status: 400 })
+    current = `incident-rt${used.length}`
+    return Response.json(tokenResponse({ refresh_token: current }))
+  })
+  const stale = session({ refreshToken: current })
+  const original = await requestWithSession('/api/prompt', stale)
+  assert.equal((await requestSession(original)).status, 200)
+  for (let generation = 1; generation <= 3; generation++) {
+    t.mock.timers.setTime(Date.now() + 18 * 3600_000)
+    for (const key of redisValues.keys()) if (key.includes(':auth:refresh:')) redisValues.delete(key)
+    const response = await requestSession(new NextRequest(original.url, { headers: original.headers }))
+    assert.equal(response.status, 200)
+    assert.equal(handledRequests.get(response)?.session.refreshToken, `incident-rt${generation + 1}`)
+  }
+  assert.deepEqual(used, ['incident-rt0', 'incident-rt1', 'incident-rt2', 'incident-rt3'])
+})
+
+const latestCredentialKey = (loginId = session().loginId) => `fx0:v1:auth:credential:${loginId}`
+const revokedCredentialKey = (loginId = session().loginId) => `fx0:v1:revoked-login:${loginId}`
+const redisScript = (options) => {
+  const command = JSON.parse(options.body)
+  return String((Array.isArray(command[0]) ? command[0] : command)[1])
+}
+async function browserGrant(response, loginId = session().loginId) {
+  const cookie = response.headers.getSetCookie().find((value) => value.startsWith(`${secure.grantCookieName(loginId)}=`))
+  assert.ok(cookie)
+  const request = new NextRequest('https://fx0.example/api/prompt', { headers: {
+    cookie: `${secure.SESSION_COOKIE_NAME}=${loginId}; ${cookie.split(';')[0]}`,
+  } })
+  return { request, grant: await secure.getGrantFromRequest(request), cookie }
+}
+
+for (const terminal of [false, true]) test(`${terminal ? 'terminal old-token rejection' : 'delayed rotation publication'} adopts the durable CAS winner`, async (t) => {
+  let started, release
+  const entered = new Promise((resolve) => { started = resolve })
+  const gate = new Promise((resolve) => { release = resolve })
+  const used = []
+  mockRefreshNetwork(t, async (options) => {
+    const token = options.body.get('refresh_token')
+    used.push(token)
+    if (token === `race-old-${terminal}`) {
+      started(); await gate
+      return terminal ? Response.json({ error: 'invalid_grant' }, { status: 400 })
+        : Response.json(tokenResponse({ refresh_token: 'race-late-successor' }))
+    }
+    return Response.json(tokenResponse({ refresh_token: 'race-durable-winner', access_token: 'winner-access' }))
+  })
+  const oldRequest = requestSession(await requestWithSession('/api/prompt', session({ refreshToken: `race-old-${terminal}` })))
+  await entered
+  const winner = await requestSession(await requestWithSession('/api/prompt', session({ refreshToken: `race-current-${terminal}` })))
+  assert.equal(handledRequests.get(winner).session.refreshToken, 'race-durable-winner')
+  const saved = redisValues.get(latestCredentialKey())
+  release()
+  const late = await oldRequest
+  assert.equal(late.status, 200)
+  assert.equal(handledRequests.get(late).session.refreshToken, 'race-durable-winner')
+  assert.equal(redisValues.get(latestCredentialKey()), saved)
+  assert.equal((await browserGrant(late)).grant.accessToken, 'winner-access')
+  assert.equal(used.length, 2)
+})
+
+test('interleaved legacy bootstrap advances a CAS winner whose token this exchange already consumed', async (t) => {
+  let publishStarted, releasePublish, exchangeStarted, releaseExchange
+  const publishing = new Promise((resolve) => { publishStarted = resolve })
+  const publishGate = new Promise((resolve) => { releasePublish = resolve })
+  const exchanging = new Promise((resolve) => { exchangeStarted = resolve })
+  const exchangeGate = new Promise((resolve) => { releaseExchange = resolve })
+  mockRefreshNetwork(t, async (options) => {
+    const token = options.body.get('refresh_token')
+    if (token === 'bootstrap-rt1') { exchangeStarted(); await exchangeGate }
+    return Response.json(tokenResponse({ refresh_token: token === 'bootstrap-rt0' ? 'bootstrap-rt1' : 'bootstrap-rt2' }))
+  }, async (options) => {
+    const command = JSON.parse(options.body)
+    const args = Array.isArray(command[0]) ? command[0] : command
+    if (redisScript(options).includes('auth-credential:publish')) {
+      const candidate = await unsealData(args[4 + Number(args[2])], { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 })
+      if (candidate.refreshToken === 'bootstrap-rt1') { publishStarted(); await publishGate }
+    }
+    return redisRest(options)
+  })
+  const first = requestSession(await requestWithSession('/api/prompt', session({ refreshToken: 'bootstrap-rt0' })))
+  await publishing
+  const second = requestSession(await requestWithSession('/api/prompt', session({ refreshToken: 'bootstrap-rt1' })))
+  await exchanging
+  releasePublish()
+  await first
+  releaseExchange()
+  const completed = await second
+  assert.equal(handledRequests.get(completed).session.refreshToken, 'bootstrap-rt2')
+  const durable = await unsealData(redisValues.get(latestCredentialKey()), { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 })
+  assert.equal(durable.refreshToken, 'bootstrap-rt2')
+})
+
+test('Redis read outage fails closed before provider exchange without clearing the grant', async (t) => {
+  let exchanges = 0
+  mockRefreshNetwork(t, () => { exchanges++; return Response.json(tokenResponse()) }, () => { throw new Error('Redis offline') })
+  const response = await requestSession(await requestWithSession('/api/prompt', session()))
+  assert.equal(response.status, 503)
+  assert.equal(exchanges, 0)
+  assert.equal(handledRequests.has(response), false)
+  assert.equal(response.headers.get('set-cookie'), null)
+})
+
+for (const bootstrap of [true, false]) test(`publication outage preserves the only rotated cookie and repairs exact predecessor (${bootstrap ? 'legacy bootstrap' : 'existing record'})`, async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 })
+  let failPublication = false
+  const used = []
+  mockRefreshNetwork(t, (options) => {
+    used.push(options.body.get('refresh_token'))
+    return Response.json(tokenResponse({ refresh_token: `outage-rt${used.length}`, access_token: `outage-access${used.length}` }))
+  }, (options) => {
+    if (failPublication && redisScript(options).includes('auth-credential:publish')) throw new Error('Publication unavailable')
+    return redisRest(options)
+  })
+  const original = await requestWithSession('/api/prompt', session({ refreshToken: `outage-original-${bootstrap}` }))
+  if (!bootstrap) {
+    await requestSession(original)
+    t.mock.timers.setTime(Date.now() + 2 * 3600_000)
+  }
+  const previous = redisValues.get(latestCredentialKey())
+  failPublication = true
+  const failed = await requestSession(original)
+  assert.equal(failed.status, 503)
+  assert.equal(handledRequests.has(failed), false)
+  assert.equal(redisValues.get(latestCredentialKey()), previous)
+  const preserved = await browserGrant(failed)
+  assert.equal(preserved.grant.refreshToken, `outage-rt${used.length}`)
+  assert.equal(preserved.grant.credentialPublication.previous, createHash('sha256').update(previous ?? '').digest('hex'))
+  assert.equal(preserved.grant.credentialPublication.validUntil, Date.now() + 30 * 24 * 3600_000)
+  assert.ok(Buffer.byteLength(preserved.cookie) < 4096)
+  assert.doesNotMatch(preserved.cookie, /outage-rt|outage-access/)
+  failPublication = false
+  const count = used.length
+  const repaired = await requestSession(preserved.request)
+  assert.equal(repaired.status, 200)
+  assert.equal(used.length, count, 'repair cannot exchange a token that already rotated')
+  assert.equal(handledRequests.get(repaired).session.refreshToken, preserved.grant.refreshToken)
+  assert.equal((await browserGrant(repaired)).grant.credentialPublication, undefined)
+  assert.equal(redisExpirations.get(latestCredentialKey()), preserved.grant.credentialPublication.validUntil)
+})
+
+for (const recovery of ['missing', 'winner', 'revoked']) test(`pending publication retry handles ${recovery} without replaying or resurrecting an old grant`, async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 })
+  let failPublication = false
+  const used = []
+  mockRefreshNetwork(t, (options) => {
+    used.push(options.body.get('refresh_token'))
+    return Response.json(tokenResponse({ refresh_token: `pending-rt${used.length}` }))
+  }, (options) => {
+    if (failPublication && redisScript(options).includes('auth-credential:publish')) throw new Error('Publication failed')
+    return redisRest(options)
+  })
+  const original = await requestWithSession('/api/prompt', session({ refreshToken: `pending-original-${recovery}` }))
+  await requestSession(original)
+  t.mock.timers.setTime(Date.now() + 2 * 3600_000)
+  failPublication = true
+  const failed = await requestSession(original)
+  const preserved = await browserGrant(failed)
+  assert.equal(failed.status, 503)
+  assert.equal(preserved.grant.refreshToken, 'pending-rt2')
+  failPublication = false
+  if (recovery === 'missing') redisValues.delete(latestCredentialKey())
+  if (recovery === 'revoked') redisValues.set(revokedCredentialKey(), '1')
+  if (recovery === 'winner') {
+    const winner = await unsealData(redisValues.get(latestCredentialKey()), { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 })
+    redisValues.set(latestCredentialKey(), await sealData({ ...winner, accessToken: 'winner-access', refreshToken: 'pending-winner', expiresAt: Date.now() + 3600_000 }, { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 }))
+  }
+  const repaired = await requestSession(preserved.request)
+  assert.equal(repaired.status, 200)
+  const current = handledRequests.get(repaired).session
+  if (recovery === 'missing') {
+    assert.equal(current.refreshToken, 'pending-rt3')
+    assert.equal(used.at(-1), 'pending-rt2', 'missing predecessor requires a fresh provider exchange, even with live access')
+  } else if (recovery === 'winner') {
+    assert.equal(current.refreshToken, 'pending-winner')
+    assert.equal(used.length, 2)
+  } else {
+    assert.deepEqual(current, {})
+    assert.match(repaired.headers.get('set-cookie'), /Max-Age=0/)
+    assert.equal(used.length, 2)
+  }
+})
+
+test('logout during rotation atomically fences publication and cannot resurrect the login', async (t) => {
+  mockRefreshNetwork(t, () => {
+    redisValues.set(revokedCredentialKey(), '1')
+    return Response.json(tokenResponse({ refresh_token: 'revoked-successor' }))
+  })
+  const source = await requestWithSession('/api/prompt', session({ refreshToken: 'logout-race-refresh' }))
+  const response = await requestSession(source)
+  assert.equal(redisValues.has(latestCredentialKey()), false)
+  assert.deepEqual(handledRequests.get(response).session, {})
+  assert.match(response.headers.get('set-cookie'), /Max-Age=0/)
+  assert.equal(redisExpirations.has(revokedCredentialKey()), false, 'logout tombstone has no expiry')
+  const replay = await requestSession(new NextRequest(source.url, { headers: source.headers }))
+  assert.equal(replay.status, 200, await replay.text())
+  assert.deepEqual(handledRequests.get(replay).session, {})
+})
+
+test('latest seals bind key, user, login and issuance and never own identity or selected team', async (t) => {
+  const used = mockRefreshNetwork(t, () => Response.json(tokenResponse()))
+  const original = session({ refreshToken: 'sealed-binding-refresh' })
+  await requestSession(await requestWithSession('/api/prompt', original))
+  const raw = redisValues.get(latestCredentialKey())
+  const data = await unsealData(raw, { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 })
+  assert.deepEqual(Object.keys(data).sort(), ['key', 'userId', 'loginId', 'loginAt', 'accessToken', 'refreshToken', 'expiresAt', 'validUntil'].sort())
+  assert.doesNotMatch(raw, /rotated-refresh|rotated-access|verified-sub/)
+  for (const field of ['key', 'userId', 'loginId', 'loginAt', 'validUntil']) {
+    const bad = { ...data, [field]: typeof data[field] === 'number' ? 1 : 'different-binding' }
+    redisValues.set(latestCredentialKey(), await sealData(bad, { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 }))
+    const response = await requestSession(await requestWithSession('/api/prompt', original))
+    assert.equal(response.status, 503, field)
+    assert.equal(handledRequests.has(response), false, field)
+    assert.equal(response.headers.get('set-cookie'), null, field)
+  }
+  redisValues.set(latestCredentialKey(), `${raw.slice(0, -8)}tampered`)
+  const corrupted = await requestSession(await requestWithSession('/api/prompt', original))
+  assert.equal(corrupted.status, 503)
+  assert.equal(handledRequests.has(corrupted), false)
+  assert.equal(corrupted.headers.get('set-cookie'), null)
+  redisValues.set(latestCredentialKey(), raw)
+  const changed = await requestSession(await requestWithSession('/api/prompt', { ...original, name: 'Cookie name', teamId: 'team_cookie_owner' }))
+  assert.equal(handledRequests.get(changed).session.name, 'Cookie name')
+  assert.equal(handledRequests.get(changed).session.teamId, 'team_cookie_owner')
+  assert.equal(used(), 1)
+})
+
+test('record reads do not extend 30-day retention; an inactive expired record falls back to provider rejection', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 })
+  let exchanges = 0
+  mockRefreshNetwork(t, () => ++exchanges === 1 ? Response.json(tokenResponse()) : Response.json({ error: 'invalid_grant' }, { status: 400 }))
+  const source = await requestWithSession('/api/prompt', session({ refreshToken: 'retention-original-refresh' }))
+  await requestSession(source)
+  const until = redisExpirations.get(latestCredentialKey())
+  t.mock.timers.setTime(Date.now() + 10 * 60_000)
+  await requestSession(source)
+  assert.equal(redisExpirations.get(latestCredentialKey()), until)
+  t.mock.timers.setTime(until + 1)
+  const inactive = await requestSession(source)
+  assert.deepEqual(handledRequests.get(inactive).session, {})
+  assert.equal(redisValues.has(latestCredentialKey()), false)
+  assert.equal(exchanges, 2)
+})
 
 test('profile endpoint renews its credential in the handler without middleware', async (t) => {
   const exchanges = mockRefreshNetwork(t, () => Response.json(tokenResponse()))
@@ -589,23 +897,135 @@ test('terminal invalid_grant clears current request and browser, without droppin
   assert.ok(handledRequests.has(response))
 })
 
-test('renewal logs link a rejected refresh token to the exchange that rotated it, without credentials', async (t) => {
-  const tag = (value) => createHash('sha256').update(value).digest('hex').slice(0, 10)
+test('renewal logs retain safe token correlation while stale cookies recover without exchanging again', async (t) => {
+  const tag = (value) => expectedLogTag('refresh', value)
   const logged = []
   for (const level of ['info', 'error']) t.mock.method(console, level, (line) => logged.push(JSON.parse(line)))
   const results = [() => Response.json(tokenResponse()), () => Response.json({ error: 'invalid_grant' }, { status: 400 })]
   mockRefreshNetwork(t, () => results.shift()())
   await requestSession(await requestWithSession('/api/prompt', session({ refreshToken: 'trail-refresh' })))
   await requestSession(await requestWithSession('/api/prompt', session({ refreshToken: 'rotated-refresh' })))
-  const trail = logged.filter(({ event }) => event.startsWith('auth:')).map(({ at, sessionAgeS, accessExpiresInS, ...rest }) => rest)
-  const ids = { user: tag('verified-sub'), login: tag(session().loginId) }
+  const trail = logged.filter(({ event }) => ['auth:refresh:exchanged', 'auth:session:renewed', 'auth:session:ended'].includes(event))
+    .map(({ at, sessionAgeS, accessExpiresInS, ...rest }) => rest)
+  const ids = { user: expectedLogTag('user', 'verified-sub'), login: expectedLogTag('login', session().loginId) }
   assert.deepEqual(trail, [
     { event: 'auth:refresh:exchanged', rt: tag('trail-refresh'), next: tag('rotated-refresh'), expiresIn: tokenResponse().expires_in },
     { event: 'auth:session:renewed', ...ids, rt: tag('trail-refresh') },
-    { event: 'auth:refresh:rejected', rt: tag('rotated-refresh'), status: 400, error: 'invalid_grant' },
-    { event: 'auth:session:ended', ...ids, rt: tag('rotated-refresh') },
+    { event: 'auth:session:renewed', ...ids, rt: tag('rotated-refresh') },
   ])
   assert.doesNotMatch(JSON.stringify(logged), /trail-refresh|rotated-refresh|rotated-access|verified-sub|user@example/)
+})
+
+test('request traces distinguish cookie preparation, browser adoption and a later stale-cookie replay', async (t) => {
+  const logged = []
+  for (const level of ['info', 'error']) t.mock.method(console, level, (line) => logged.push(JSON.parse(line)))
+  const tag = (value) => expectedLogTag('refresh', value)
+  const page = 'd1b4ae9a-a824-4e2a-b39e-b795dadc0692'
+  const context = { 'x-fx0-auth-page': page, 'x-fx0-auth-prerender': '1', 'x-fx0-auth-visibility': 'hidden',
+    purpose: 'prefetch', 'sec-purpose': 'Prefetch; Prerender', authorization: 'Bearer do-not-log-authorization' }
+  const calls = mockRefreshNetwork(t, () => Response.json(tokenResponse()))
+  const original = await requestWithSession('/api/prompt?access_token=do-not-log-query', session({ refreshToken: 'trace-original-refresh' }), context)
+  const first = await requestSession(original)
+  const { request: adopted, cookie } = await browserGrant(first)
+  for (const [name, value] of Object.entries(context)) adopted.headers.set(name, value)
+  await requestSession(adopted)
+  await requestSession(new NextRequest(original.url, { headers: original.headers }))
+  const received = logged.filter(({ event }) => event === 'auth:request:received')
+  const responses = logged.filter(({ event }) => event === 'auth:request:response')
+  assert.equal(calls(), 1)
+  assert.equal(received.length, 3)
+  assert.equal(responses.length, 3)
+  assert.equal(new Set(received.map(({ request }) => request)).size, 3)
+  for (const [i, entry] of received.entries()) {
+    assert.equal(entry.request, responses[i].request)
+    assert.equal(entry.page, expectedLogTag('page', page))
+    assert.equal(entry.purpose, 'prefetch')
+    assert.equal(entry.secPurpose, 'prefetch;prerender')
+    assert.equal(entry.prerender, true)
+    assert.equal(entry.visibility, 'hidden')
+  }
+  assert.equal(responses[0].grantCookieAction, 'set')
+  assert.equal(responses[0].preparedRt, tag('rotated-refresh'))
+  assert.equal(responses[0].preparedGrantCookie, expectedLogTag('cookie', cookie.split(';')[0].split('=')[1]))
+  assert.equal(responses[0].preparedGrantCookie, received[1].grantCookie)
+  assert.equal(responses[0].preparedRt, received[1].rt, 'a later request proves the new generation returned')
+  assert.equal(responses[1].outcome, 'unchanged')
+  assert.equal(responses[1].grantCookieAction, 'none')
+  assert.equal(received[2].rt, tag('trace-original-refresh'), 'the old generation returned after adoption')
+  assert.equal(responses[2].selectedRt, tag('rotated-refresh'))
+  assert.ok(logged.some(({ event, request, source, cookieRt, rt }) => event === 'auth:credential:selected' &&
+    request === received[2].request && source === 'latest' && cookieRt === received[2].rt && rt === responses[2].selectedRt))
+  const text = JSON.stringify(logged)
+  for (const secret of [page, cookie.split(';')[0].split('=')[1], 'trace-original-refresh', 'rotated-refresh', 'rotated-access',
+    'verified-sub', 'user@example.com', 'do-not-log-query', 'do-not-log-authorization']) assert.ok(!text.includes(secret), secret)
+})
+
+for (const failure of ['read', 'publish', 'handler']) test(`request traces identify ${failure} failures without logging exception details`, async (t) => {
+  const logged = []
+  for (const level of ['info', 'error']) t.mock.method(console, level, (line) => logged.push(JSON.parse(line)))
+  const secret = 'do-not-log-private-failure'
+  mockRefreshNetwork(t, () => Response.json(tokenResponse()), (options) => {
+    if (redisScript(options).includes(`auth-credential:${failure}`)) throw new Error(secret)
+    return redisRest(options)
+  })
+  const source = await requestWithSession('/api/prompt', session({ refreshToken: `trace-failure-${failure}` }), {
+    purpose: `Bearer ${secret}`, 'sec-purpose': secret, 'x-fx0-auth-page': secret,
+    'x-fx0-auth-visibility': secret, 'x-fx0-auth-prerender': secret,
+  })
+  const response = await withRequestSession(() => {
+    if (failure === 'handler') throw new Error(secret)
+    return Response.json({ ok: true })
+  })(source)
+  assert.equal(response.status, 503)
+  const prepared = logged.find(({ event }) => event === 'auth:request:response')
+  assert.equal(prepared.purpose, 'other')
+  assert.equal(prepared.secPurpose, 'other')
+  assert.equal(prepared.prerender, null)
+  assert.equal(prepared.visibility, 'unknown')
+  assert.equal(prepared.handlerDispatched, failure === 'handler')
+  assert.equal(prepared.grantCookieAction, failure === 'read' ? 'none' : 'set')
+  assert.equal(prepared.preparedRt, failure === 'read' ? null : expectedLogTag('refresh', 'rotated-refresh'))
+  if (failure === 'publish') {
+    assert.equal(prepared.outcome, 'unavailable')
+    assert.ok(logged.some(({ event, request }) => event === 'auth:credential:publish_failed' && request === prepared.request))
+  } else {
+    assert.equal(prepared.outcome, 'error')
+    assert.ok(logged.some(({ event, stage, request }) => event === 'auth:request:failed' && request === prepared.request &&
+      stage === (failure === 'read' ? 'renewal' : 'handler')))
+  }
+  assert.doesNotMatch(JSON.stringify(logged), /do-not-log-private-failure|rotated-refresh|rotated-access|verified-sub|user@example/)
+})
+
+for (const renew of [false, true]) test(`response tracing inspects final grant headers, including ${renew ? 'duplicate' : 'handler-owned'} cookies`, async (t) => {
+  const logged = []
+  for (const level of ['info', 'error']) t.mock.method(console, level, (line) => logged.push(JSON.parse(line)))
+  mockRefreshNetwork(t, () => Response.json(tokenResponse()))
+  const data = session({ expiresAt: Date.now() + (renew ? 60_000 : 3600_000) })
+  const cookie = `${secure.grantCookieName(data.loginId)}=do-not-log-handler-cookie; Path=/; HttpOnly`
+  const response = await withRequestSession(() => new Response(null, { headers: { 'set-cookie': cookie } }))(
+    await requestWithSession('/api/prompt', data))
+  assert.equal(response.status, 200)
+  const prepared = logged.find(({ event }) => event === 'auth:request:response')
+  assert.equal(prepared.grantCookieAction, renew ? 'multiple' : 'set')
+  assert.equal(prepared.grantCookieCount, renew ? 2 : 1)
+  assert.equal(prepared.preparedRt, null, 'do not claim a token generation when the final header is ambiguous or handler-owned')
+  assert.doesNotMatch(JSON.stringify(logged), /do-not-log-handler-cookie/)
+})
+
+test('request traces record missing and invalid grants without exposing cookie or selector values', async (t) => {
+  const logged = []
+  for (const level of ['info', 'error']) t.mock.method(console, level, (line) => logged.push(JSON.parse(line)))
+  t.mock.method(globalThis, 'fetch', async () => assert.fail('invalid grants make no external requests'))
+  const id = session().loginId
+  for (const cookie of ['', `${secure.SESSION_COOKIE_NAME}=do-not-log-invalid-selector`, `${secure.SESSION_COOKIE_NAME}=${id}`,
+    `${secure.SESSION_COOKIE_NAME}=${id}; ${secure.grantCookieName(id)}=do-not-log-invalid-grant`]) {
+    await requestSession(new NextRequest('https://fx0.example/api/prompt', { headers: { cookie } }))
+  }
+  const received = logged.filter(({ event }) => event === 'auth:request:received')
+  assert.deepEqual(received.map(({ selector, authenticated, grantCookie }) => [selector, authenticated, grantCookie !== null]), [
+    ['missing', false, false], ['invalid', false, false], ['valid', false, false], ['valid', false, true],
+  ])
+  assert.doesNotMatch(JSON.stringify(logged), /do-not-log-invalid-selector|do-not-log-invalid-grant/)
 })
 
 test('transient refresh preserves cookie; known-expired credentials do not reach the handler', async (t) => {
@@ -656,17 +1076,22 @@ test('renewal reseals the grant as stored, without the in-app team choice', asyn
   assert.equal((await secure.getSessionFromRequest(forwarded)).teamId, 'team_chosen')
 })
 
-test('an expired short-lived cached result is not dispatched, but its rotated refresh token is preserved', async (t) => {
+test('an expired latest access token refreshes the current refresh token, not the stale cookie token', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
-  const calls = mockRefreshNetwork(t, () => Response.json(tokenResponse({ expires_in: 60 })))
+  const used = []
+  const calls = mockRefreshNetwork(t, (options) => {
+    used.push(options.body.get('refresh_token'))
+    return Response.json(tokenResponse({ expires_in: 60 }))
+  })
   const request = await requestWithSession('/api/prompt', session({ refreshToken: 'proxy-short-lived-refresh' }))
   const first = await requestSession(request)
   assert.ok(handledRequests.has(first))
   t.mock.timers.setTime(Date.now() + 70_000)
   const second = await requestSession(request)
-  assert.equal(calls(), 1, 'reuse the encrypted result; never exchange the stale refresh token twice')
-  assert.equal(second.status, 503)
-  assert.equal(handledRequests.has(second), false)
+  assert.equal(calls(), 2)
+  assert.deepEqual(used, ['proxy-short-lived-refresh', 'rotated-refresh'])
+  assert.equal(second.status, 200)
+  assert.equal(handledRequests.has(second), true)
   const cookie = second.headers.getSetCookie().find((value) => value.startsWith(`${secure.grantCookieName(session().loginId)}=`))
   const next = new NextRequest('https://fx0.example', { headers: {
     cookie: `${secure.SESSION_COOKIE_NAME}=${session().loginId}; ${cookie.split(';')[0]}`,

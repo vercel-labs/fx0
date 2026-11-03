@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
       status: 503, headers: { 'Cache-Control': 'no-store', 'Retry-After': '5' },
     })
   }
-  if (userId && sessionLoginId) logAuth('auth:signout', { user: logTag(userId), login: logTag(sessionLoginId) })
+  if (userId && sessionLoginId) logAuth('auth:signout', { user: logTag('user', userId), login: logTag('login', sessionLoginId) })
   // Workers reject the revoked login even if cleanup or provider revocation
   // fails after the response. Neither needs to delay the browser.
   after(() => Promise.all([

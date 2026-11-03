@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 
 export function randomHandle(): string {
   return randomBytes(32).toString('base64url')
@@ -8,9 +8,13 @@ export function hashHandle(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
-// Short one-way tag that links log lines for one user, login or refresh token.
-export function logTag(value: string): string {
-  return hashHandle(value).slice(0, 10)
+// Purpose-separated HMAC tags correlate logs only within the same kind.
+// Missing log key material must not block authentication or expose unkeyed tags.
+export function logTag(kind: 'user' | 'login' | 'refresh' | 'cookie' | 'page', value: string): string | null {
+  const secret = process.env.SESSION_SECRET
+  if (!secret || secret.length < 32) return null
+  const key = createHmac('sha256', secret).update('fx0:auth-log-key:v1').digest()
+  return createHmac('sha256', key).update(kind).update('\0').update(value).digest('hex').slice(0, 24)
 }
 
 export function pkceChallenge(verifier: string): string {

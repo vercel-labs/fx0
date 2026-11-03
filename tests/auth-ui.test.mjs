@@ -23,7 +23,9 @@ function browser(t, local = storage(), session = storage()) {
   const original = Object.getOwnPropertyDescriptor(globalThis, 'window')
   const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
   const cookies = new Map([['fx0-signed-in', '1']])
-  Object.defineProperty(globalThis, 'document', { configurable: true, value: {
+  Object.defineProperty(globalThis, 'document', { configurable: true, writable: true, value: {
+    prerendering: false,
+    visibilityState: 'visible',
     get cookie() { return [...cookies].map(([name, value]) => `${name}=${value}`).join('; ') },
     set cookie(raw) {
       const [name, value] = raw.split(';')[0].split('=')
@@ -131,6 +133,133 @@ test('ordinary API errors stay with the owning UI and do not close the auth gate
   assert.equal((await ui.fetchUi('/api/model')).status, 503)
   assert.equal(fetch.mock.callCount(), 2)
   assert.deepEqual(events, [])
+})
+
+test('API diagnostics use one lazy document-local page ID and read live browser context', async (t) => {
+  const local = storage()
+  const session = storage()
+  browser(t, local, session)
+  const cookie = document.cookie
+  const randomUUID = t.mock.method(globalThis.crypto, 'randomUUID')
+  const ui = await loadUi()
+  assert.equal(randomUUID.mock.callCount(), 0, 'module loading does not create an identity')
+  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 200 }))
+  document.prerendering = true
+  document.visibilityState = 'hidden'
+  await ui.fetchUi('/api/sessions')
+  document.prerendering = false
+  document.visibilityState = 'visible'
+  await ui.fetchUi('/api/model')
+  const first = fetch.mock.calls[0].arguments[1].headers
+  const second = fetch.mock.calls[1].arguments[1].headers
+  const page = first.get('x-fx0-auth-page')
+  assert.match(page, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  assert.equal(second.get('x-fx0-auth-page'), page)
+  assert.equal(randomUUID.mock.callCount(), 1)
+  assert.equal(first.get('x-fx0-auth-prerender'), '1')
+  assert.equal(first.get('x-fx0-auth-visibility'), 'hidden')
+  assert.equal(second.get('x-fx0-auth-prerender'), '0')
+  assert.equal(second.get('x-fx0-auth-visibility'), 'visible')
+  const nextDocument = await loadUi()
+  assert.equal(randomUUID.mock.callCount(), 1)
+  await nextDocument.fetchUi('/api/sessions')
+  assert.notEqual(fetch.mock.calls[2].arguments[1].headers.get('x-fx0-auth-page'), page)
+  assert.equal(randomUUID.mock.callCount(), 2)
+  assert.equal(document.cookie, cookie)
+  assert.equal(local.length, 0)
+  assert.equal(session.length, 0)
+})
+
+test('API diagnostics preserve caller headers, request options and cancellation', async (t) => {
+  browser(t)
+  const ui = await loadUi()
+  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 200 }))
+  for (const headers of [
+    { 'content-type': 'application/json', 'x-caller': 'keep' },
+    [['content-type', 'application/json'], ['x-caller', 'keep']],
+    new Headers({ 'content-type': 'application/json', 'x-caller': 'keep' }),
+  ]) {
+    const controller = new AbortController()
+    const init = { method: 'POST', body: '{"model":"test"}', headers, signal: controller.signal, credentials: 'same-origin', keepalive: true }
+    await ui.fetchUi('/api/model', init)
+    const [input, sent] = fetch.mock.calls.at(-1).arguments
+    assert.equal(input, '/api/model')
+    assert.equal(sent.headers.get('content-type'), 'application/json')
+    assert.equal(sent.headers.get('x-caller'), 'keep')
+    assert.equal(new Headers(headers).has('x-fx0-auth-page'), false, 'caller headers are not mutated')
+    assert.deepEqual({ ...sent, headers, signal: controller.signal }, init)
+    assert.equal(sent.signal.aborted, false)
+    controller.abort()
+    assert.equal(sent.signal.aborted, true)
+  }
+})
+
+test('diagnostics do not attach to absolute, protocol-relative, backslash or non-API URLs', async (t) => {
+  browser(t)
+  const ui = await loadUi()
+  const randomUUID = t.mock.method(globalThis.crypto, 'randomUUID')
+  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 200 }))
+  const headers = { 'x-caller': 'keep' }
+  for (const input of [
+    'https://external.example/api/sessions',
+    'https://fx0.example/api/sessions',
+    '//external.example/api/sessions',
+    '/\\external.example/api/sessions',
+    '/api/\\external.example/sessions',
+    '\\api\\sessions',
+    '/sessions',
+    '/api',
+  ]) {
+    await ui.fetchUi(input, { headers })
+    const [url, init] = fetch.mock.calls.at(-1).arguments
+    assert.equal(url, input)
+    assert.equal(init.headers, headers)
+  }
+  assert.equal(randomUUID.mock.callCount(), 0)
+})
+
+test('unsupported browser state is reported as unknown, not as observed non-prerendering', async (t) => {
+  browser(t)
+  const ui = await loadUi()
+  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 200 }))
+  delete document.prerendering
+  for (const state of [undefined, 'unrecognized']) {
+    document.visibilityState = state
+    await ui.fetchUi('/api/sessions')
+    const headers = fetch.mock.calls.at(-1).arguments[1].headers
+    assert.equal(headers.get('x-fx0-auth-prerender'), 'unknown')
+    assert.equal(headers.get('x-fx0-auth-visibility'), 'unknown')
+  }
+})
+
+test('unavailable or throwing diagnostic APIs never prevent fetching', async (t) => {
+  for (const scenario of [
+    'missing crypto', 'missing randomUUID', 'throwing randomUUID', 'throwing crypto',
+    'missing document', 'throwing document', 'throwing prerendering', 'throwing visibility',
+  ]) {
+    await t.test(scenario, async (t) => {
+      browser(t)
+      const ui = await loadUi()
+      const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto')
+      t.after(() => Object.defineProperty(globalThis, 'crypto', originalCrypto))
+      const blocked = () => { throw new Error('Unavailable browser API') }
+      if (scenario === 'missing crypto') Object.defineProperty(globalThis, 'crypto', { configurable: true, value: undefined })
+      if (scenario === 'missing randomUUID') Object.defineProperty(globalThis, 'crypto', { configurable: true, value: {} })
+      if (scenario === 'throwing randomUUID') Object.defineProperty(globalThis, 'crypto', { configurable: true, value: { randomUUID: blocked } })
+      if (scenario === 'throwing crypto') Object.defineProperty(globalThis, 'crypto', { configurable: true, get: blocked })
+      if (scenario === 'missing document') globalThis.document = undefined
+      if (scenario === 'throwing document') Object.defineProperty(globalThis, 'document', { configurable: true, get: blocked })
+      if (scenario === 'throwing prerendering') Object.defineProperty(document, 'prerendering', { get: blocked })
+      if (scenario === 'throwing visibility') Object.defineProperty(document, 'visibilityState', { get: blocked })
+      const response = new Response(null, { status: 200 })
+      const fetch = t.mock.method(globalThis, 'fetch', async () => response)
+      const headers = { 'x-caller': 'keep' }
+      assert.equal(await ui.fetchUi('/api/sessions', { headers }), response)
+      assert.equal(fetch.mock.callCount(), 1)
+      assert.equal(fetch.mock.calls[0].arguments[1].headers, headers)
+      assert.equal(ui.uiAuthError(), null)
+    })
+  }
 })
 
 test('storage cleanup is app-scoped and tolerates unavailable storage', async (t) => {

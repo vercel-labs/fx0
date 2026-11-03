@@ -196,6 +196,20 @@ npm run test:turns:integration    # needs local redis-server/redis-cli; no remot
 
 The auth and route tests mock Vercel, AI Gateway and both databases, so check a real sign-in and real billing on a deployment.
 
+## Diagnosing sign-outs
+
+Authentication diagnostics use `auth:request:*` and `auth:credential:*` events in runtime logs. Each API request gets a server-generated `request` ID. The UI also sends a document-local ID, prerender state and visibility; these are diagnostic hints, not proof of authentication or a shared browser profile.
+
+Fingerprints are 24 hexadecimal characters of HMAC-SHA-256, with a separate logging subkey derived from `SESSION_SECRET` and separate domains for users, logins, refresh tokens, cookies and pages. Missing or invalid key material produces `null`, never an unkeyed hash or the original value. Rotating `SESSION_SECRET` changes the fingerprints; older unkeyed tags cannot be compared directly with these tags. Logs remain pseudonymous operational data: restrict access, keep retention limited to operational needs, and do not publish production logs in public issues or PRs.
+
+- `auth:request:received` records keyed login, grant-cookie and refresh-token fingerprints on every wrapped request, including requests that do not renew.
+- `auth:credential:read`, `selected` and `publish` show whether Redis supplied a newer credential, a publication lost a race, or logout fenced it. `read_failed`, `invalid` and `publish_failed` identify recovery failures without exception contents.
+- `auth:request:response` records the selected token, status, whether the handler ran, and the final prepared grant-cookie header: `grantCookieAction`, `preparedGrantCookie` and `preparedRt`.
+
+Compare a response's `preparedRt` with later requests' `rt`. A matching `preparedGrantCookie` / `grantCookie` also confirms that exact sealed cookie returned. If a new generation returns and an old one later reappears, the logs establish a rollback or a different request context. If the new generation never returns, server logs alone cannot distinguish a lost response from browser cookie rejection or no further requests. Header preparation is not delivery or browser acceptance.
+
+`purpose` and `secPurpose` contain only recognized directives; `prerender: null` means unknown. Native navigation and iframe requests may have no UI page context. No plaintext tokens, cookies, authorization headers, query strings or exception details are logged.
+
 ## Safety
 
 Generated pages run in a sandboxed iframe on an opaque origin. They can't read the app's cookies, storage or credentials, and their Content Security Policy blocks network requests (`connect-src 'none'`). It's still the browser enforcing all of this, though, not a sealed VM.

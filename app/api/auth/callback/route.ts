@@ -57,8 +57,8 @@ export async function GET(request: NextRequest) {
     sessionCookies.push(selectorCookie(session.loginId).setCookie, cookie.setCookie,
       signedInHintCookie(true, process.env.NODE_ENV === 'production'),
       signOutPendingCookie(false, process.env.NODE_ENV === 'production'))
-    logAuth('auth:login', { user: logTag(session.userId), login: logTag(session.loginId), rt: logTag(tokens.refresh_token),
-      replaced: isLoginId(previous) && previous !== session.loginId ? logTag(previous) : null })
+    logAuth('auth:login', { user: logTag('user', session.userId), login: logTag('login', session.loginId), rt: logTag('refresh', tokens.refresh_token),
+      replaced: isLoginId(previous) && previous !== session.loginId ? logTag('login', previous) : null })
   } catch (error) {
     logAuthFailure('auth:callback:failed', error)
     response = origin

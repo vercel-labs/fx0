@@ -17,8 +17,8 @@ export function logAuthFailure(event: string, error: unknown): void {
   console.error(JSON.stringify({ at: new Date().toISOString(), event, error: message }))
 }
 
-// Login, renewal and sign-out trail. Values are logTag hashes, statuses and
-// OAuth error codes, never credentials or provider bodies.
+// Login, renewal and sign-out trail. Values are keyed logTag fingerprints,
+// statuses and OAuth error codes, never credentials or provider bodies.
 export function logAuth(event: string, detail: Record<string, unknown> = {}, level: 'info' | 'error' = 'info'): void {
   console[level](JSON.stringify({ at: new Date().toISOString(), event, ...detail }))
 }
