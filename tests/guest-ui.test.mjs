@@ -32,6 +32,7 @@ const { default: Transcript } = await import(pathToFileURL(join(output, 'compone
 const { default: PreviewPane } = await import(pathToFileURL(join(output, 'components/preview-pane.js')).href)
 const { compactTranscript } = await import(pathToFileURL(join(output, 'lib/transcript.js')).href)
 const { default: Sidebar } = await import(pathToFileURL(join(output, 'components/sidebar.js')).href)
+const { default: Brand } = await import(pathToFileURL(join(output, 'components/brand.js')).href)
 const { default: AccountMenu } = await import(pathToFileURL(join(output, 'components/account-menu.js')).href)
 const { default: SourceLink } = await import(pathToFileURL(join(output, 'components/source-link.js')).href)
 const { default: ImagePreview } = await import(pathToFileURL(join(output, 'components/image-preview.js')).href)
@@ -1437,6 +1438,58 @@ test('publish with Drop opens Vercel Drop inside the click, before the design lo
   // Synchronous, in the user's click, so a popup blocker allows it.
   assert.deepEqual(opened, [[DROP_URL, '_blank', 'noopener,noreferrer']])
   assert.equal(DROP_URL, 'https://vercel.com/drop')
+})
+
+test('normal sidebar keeps its home, help, account, row spacing and two-click delete defaults', () => {
+  const deleted = [], selected = []
+  let homes = 0
+  const props = {
+    sessions: [{ id: 'chat-1', title: 'Saved chat', lastActivity: 1, busy: false }],
+    activeId: 'chat-1', loadingId: null, now: 10,
+    onSelect: id => selected.push(id), onPrefetch() {}, onNew: () => homes++,
+    onDelete: id => deleted.push(id), user: null, team: null,
+    onSignIn() {}, onSignOut() {}, onSwitchTeam: async () => {}, onGrantTeams() {},
+  }
+  const sidebar = renderHooks(Sidebar.type)
+  const render = () => sidebar.render(props)
+  const tree = render()
+  const brand = find(tree, node => node.type === Brand)
+  const anchor = Brand(brand.props)
+  assert.equal(anchor.props.href, '/')
+  assert.ok(find(tree, node => node.type === HowItWorks))
+  assert.equal(find(tree, node => node.type === AccountMenu).props.user, null)
+  assert.match(find(tree, node => node.props?.title === 'Saved chat').props.className, /group-focus-within\/row:pr-6 group-hover\/row:pr-6/)
+  let prevented = 0
+  const click = { button: 0, preventDefault: () => prevented++ }
+  anchor.props.onClick(click)
+  assert.equal(homes, 1)
+  assert.equal(prevented, 1)
+  for (const modifier of ['metaKey', 'ctrlKey', 'shiftKey', 'altKey']) anchor.props.onClick({ ...click, [modifier]: true })
+  anchor.props.onClick({ ...click, button: 1 })
+  assert.equal(homes, 1, 'modified clicks retain native link behavior')
+  assert.equal(prevented, 1)
+  find(tree, node => node.props?.['aria-current'] === 'page').props.onClick({ detail: 0 })
+  assert.deepEqual(selected, ['chat-1'])
+  find(tree, node => node.props?.['aria-label'] === 'delete Saved chat').props.onClick()
+  assert.deepEqual(deleted, [])
+  find(render(), node => node.props?.['aria-label'] === 'confirm delete Saved chat').props.onClick()
+  assert.deepEqual(deleted, ['chat-1'])
+  assert.ok(find(render(), node => node.props?.['aria-label'] === 'delete Saved chat'))
+})
+
+test('demo sidebar overrides stay opt-in without duplicating the normal sidebar', () => {
+  const tree = renderHooks(Sidebar.type).render({
+    sessions: [{ id: 'room-1', title: 'Room', lastActivity: 1, busy: false }],
+    activeId: 'room-1', loadingId: null, now: 10,
+    onSelect() {}, onPrefetch() {}, onNew() {},
+    homeHref: '/ampersand', help: false, account: false,
+    user: null, team: null, onSignIn() {}, onSignOut() {}, onSwitchTeam: async () => {}, onGrantTeams() {},
+  })
+  assert.equal(Brand(find(tree, node => node.type === Brand).props).props.href, '/ampersand')
+  assert.equal(find(tree, node => node.type === HowItWorks), null)
+  assert.equal(find(tree, node => node.type === AccountMenu), null)
+  assert.equal(find(tree, node => node.props?.['aria-label'] === 'delete Room'), null)
+  assert.doesNotMatch(find(tree, node => node.props?.title === 'Room').props.className, /group-hover\/row:pr-6/)
 })
 
 // Sign-out intentionally closes this document's shared auth gate until reload.

@@ -34,6 +34,8 @@ function Sidebar({
   onPrefetch,
   onNew,
   onDelete,
+  homeHref,
+  help,
   user,
   team,
   onSignIn,
@@ -47,14 +49,18 @@ function Sidebar({
   loadingMore = false,
   onLoadMore,
 }: {
-  sessions: SessionInfo[]
+  // Only what a row shows, so rooms fit as well as chats.
+  sessions: Pick<SessionInfo, 'id' | 'title' | 'lastActivity' | 'busy'>[]
   activeId: string
   loadingId: string | null
   now: number
   onSelect: (id: string) => void
   onPrefetch: (id: string) => void
   onNew: () => void
-  onDelete: (id: string) => void
+  onDelete?: (id: string) => void
+  // Another entry point's home link and help dialog; fx0's own when left out.
+  homeHref?: string
+  help?: ReactNode
   user: AccountUser | null | undefined
   team: string | null
   onSignIn: () => void
@@ -75,10 +81,10 @@ function Sidebar({
       {/* Text in this column starts 24px from the edge, like the composer's text: a
           12px gutter (px-3) plus 12px inside each row's highlight (px-3). */}
       <div className="flex h-12 items-center justify-between gap-6 pl-6 pr-4.5">
-        <Brand onHome={onNew} />
+        <Brand href={homeHref} onHome={onNew} />
         <div className="flex items-center">
           <SourceLink />
-          <HowItWorks />
+          {help ?? <HowItWorks />}
         </div>
       </div>
 
@@ -142,7 +148,8 @@ function Sidebar({
                 <span
                   title={session.title ?? 'new chat'}
                   className={cn(
-                    'block w-full min-w-0 max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-[13px] leading-5 group-focus-within/row:pr-6 group-hover/row:pr-6',
+                    'block w-full min-w-0 max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-[13px] leading-5',
+                    onDelete && 'group-focus-within/row:pr-6 group-hover/row:pr-6',
                     active ? 'font-semibold' : 'font-normal',
                     confirming && 'pr-14 group-focus-within/row:pr-14 group-hover/row:pr-14',
                   )}
@@ -165,7 +172,7 @@ function Sidebar({
                 </span>
               </button>
               {/* A plain click, not fastClick: sliding off the row cancels a delete. */}
-              <button
+              {onDelete && <button
                 type="button"
                 aria-label={confirming ? `confirm delete ${session.title ?? 'new chat'}` : `delete ${session.title ?? 'new chat'}`}
                 onClick={() => {
@@ -188,7 +195,7 @@ function Sidebar({
                     <path d="m4 4 8 8M12 4l-8 8" />
                   </svg>
                 )}
-              </button>
+              </button>}
               </div>
             )
           })}
