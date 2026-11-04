@@ -16,6 +16,7 @@ import { getGrantFromRequest, getSessionFromRequest, isAuthenticatedSession, sea
 import { loginRevoked } from './turn-credential.ts'
 
 type SessionHandler = (request: Request, session: Partial<SessionData>) => Response | Promise<Response>
+type RenewalStatus = Awaited<ReturnType<typeof renewSessionCredential>>['status']
 
 // Purpose headers are untrusted: log only known directives, never arbitrary values.
 function requestPurpose(value: string | null): string | null {
@@ -25,6 +26,31 @@ function requestPurpose(value: string | null): string | null {
     ['prefetch', 'prerender', 'anonymous-client-ip'].includes(part)) ? parts.join(';') : 'other'
 }
 
+// Page context is client-provided diagnostics, never authentication evidence.
+function headerContext(headers: Headers) {
+  const page = headers.get('x-fx0-auth-page')
+  const visibility = headers.get('x-fx0-auth-visibility')
+  const prerender = headers.get('x-fx0-auth-prerender')
+  return {
+    page: page ? logTag('page', page) : null,
+    purpose: requestPurpose(headers.get('purpose')),
+    secPurpose: requestPurpose(headers.get('sec-purpose')),
+    visibility: visibility === 'visible' || visibility === 'hidden' ? visibility : 'unknown',
+    prerender: prerender === '1' ? true : prerender === '0' ? false : null,
+  }
+}
+
+function selectedCookieDetails(headers: Headers, selectedName: string | undefined) {
+  const selectedCookies = selectedName ? headers.getSetCookie()
+    .filter((cookie) => cookie.startsWith(`${selectedName}=`)) : []
+  const value = selectedCookies.length === 1 ? selectedCookies[0].slice(selectedName!.length + 1).split(';')[0] : undefined
+  return {
+    value,
+    grantCookieAction: !selectedCookies.length ? 'none' : selectedCookies.length > 1 ? 'multiple' : value ? 'set' : 'clear',
+    grantCookieCount: selectedCookies.length,
+  }
+}
+
 // Renewal belongs to the API request that consumes the credential. Pages only
 // read identity, and login/logout own selector changes.
 export function withRequestSession(body: SessionHandler) {
@@ -32,17 +58,9 @@ export function withRequestSession(body: SessionHandler) {
     const cookies: SessionCookie[] = []
     const requestId = randomUUID()
     const startedAt = Date.now()
-    // Page context is client-provided diagnostics, never authentication evidence.
-    const page = request.headers.get('x-fx0-auth-page')
-    const visibility = request.headers.get('x-fx0-auth-visibility')
-    const prerender = request.headers.get('x-fx0-auth-prerender')
     const context: Record<string, unknown> = {
       request: requestId,
-      page: page ? logTag('page', page) : null,
-      purpose: requestPurpose(request.headers.get('purpose')),
-      secPurpose: requestPurpose(request.headers.get('sec-purpose')),
-      visibility: visibility === 'visible' || visibility === 'hidden' ? visibility : 'unknown',
-      prerender: prerender === '1' ? true : prerender === '0' ? false : null,
+      ...headerContext(request.headers),
     }
     let selectedName: string | undefined
     let incomingRt: string | null = null
@@ -89,15 +107,15 @@ export function withRequestSession(body: SessionHandler) {
         selectedRt = null
         outcome = 'revoked'
       }
-      let sealed: SessionCookie | undefined
       let expiresAt = grant.expiresAt ?? 0
-      let unavailable = false
+      let renewalStatus: RenewalStatus | undefined
       if (!revoked && isAuthenticatedSession(grant) && (needsTokenRefresh(grant) || grant.credentialPublication)) {
         stage = 'renewal'
         const result = await renewSessionCredential(grant, requestId)
         outcome = result.status
-        unavailable = result.status === 'unavailable'
+        renewalStatus = result.status
         stage = 'cookie-seal'
+        let sealed: SessionCookie | undefined
         if (result.status === 'terminal') {
           selectedRt = null
           sealed = await sealSessionCookie(null, grant.loginId)
@@ -120,7 +138,7 @@ export function withRequestSession(body: SessionHandler) {
         }
       }
 
-      if (unavailable || (!revoked && isAuthenticatedSession(grant) && expiresAt <= Date.now() && sealed?.value !== '')) {
+      if (renewalStatus === 'unavailable' || (!revoked && isAuthenticatedSession(grant) && expiresAt <= Date.now() && renewalStatus !== 'terminal')) {
         response = Response.json({ error: 'Authentication temporarily unavailable. Retry shortly.' }, {
           status: 503, headers: { 'Cache-Control': 'no-store', 'Retry-After': '5' },
         })
@@ -155,15 +173,13 @@ export function withRequestSession(body: SessionHandler) {
     const headers = new Headers(response.headers)
     for (const cookie of cookies) headers.append('set-cookie', cookie.setCookie)
     const outgoing = new Response(response.body, { status: response.status, statusText: response.statusText, headers })
-    const selectedCookies = selectedName ? outgoing.headers.getSetCookie()
-      .filter((cookie) => cookie.startsWith(`${selectedName}=`)) : []
-    const value = selectedCookies.length === 1 ? selectedCookies[0].slice(selectedName!.length + 1).split(';')[0] : undefined
+    const { value, grantCookieAction, grantCookieCount } = selectedCookieDetails(outgoing.headers, selectedName)
     // This proves header preparation, not network delivery or browser acceptance.
     logAuth('auth:request:response', {
       ...context, incomingRt, selectedRt, outcome, handlerDispatched,
       status: outgoing.status, durationMs: Date.now() - startedAt,
-      grantCookieAction: !selectedCookies.length ? 'none' : selectedCookies.length > 1 ? 'multiple' : value ? 'set' : 'clear',
-      grantCookieCount: selectedCookies.length,
+      grantCookieAction,
+      grantCookieCount,
       preparedGrantCookie: value ? logTag('cookie', value) : null,
       preparedRt: value && value === preparedValue ? preparedRt : null,
     })

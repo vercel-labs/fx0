@@ -36,6 +36,11 @@ export function grantCookieName(loginId: string): string {
   return `${GRANT_COOKIE_PREFIX}${loginId}`
 }
 
+// Namespace-relative Redis key shared by credential publication and logout cleanup.
+export function loginCredentialKey(loginId: string): string {
+  return `auth:credential:${loginId}`
+}
+
 // @ts-expect-error Node strip-types tests require the source extension.
 export { SESSION_TTL_SECONDS, SIGNED_IN_HINT_COOKIE } from './session-cookies.ts'
 export const FLOW_COOKIE_NAME = 'vercel_oauth_flow'

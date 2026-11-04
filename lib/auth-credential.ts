@@ -4,7 +4,7 @@ import { authRedis, needsTokenRefresh, refreshAccessToken, sessionWithRefresh } 
 // @ts-expect-error Node strip-types tests require the source extension.
 import { hashHandle, logTag } from './auth-crypto.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { logAuth } from './auth-protocol.ts'
+import { loginCredentialKey, logAuth } from './auth-protocol.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { getSessionOptions, type SessionData } from './secure-session.ts'
 
@@ -26,7 +26,7 @@ type Renewal = { status: 'ok' | 'unavailable'; session: SessionData } | { status
 
 export async function renewSessionCredential(grant: SessionData, requestId: string): Promise<Renewal> {
   const prefix = process.env.FX0_REDIS_PREFIX?.trim() || 'fx0:v1'
-  const key = `${prefix}:auth:credential:${grant.loginId}`
+  const key = `${prefix}:${loginCredentialKey(grant.loginId)}`
   // The same permanent tombstone owned by turn-credential/logout. Both reads
   // and writes are fenced atomically, so an in-flight rotation cannot resurrect it.
   const revokedKey = `${prefix}:revoked-login:${grant.loginId}`

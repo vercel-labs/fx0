@@ -1,6 +1,8 @@
 import { sealData, unsealData } from 'iron-session'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { prefixed, redis } from './journal.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { loginCredentialKey } from './auth-protocol.ts'
 import type { SessionData } from './secure-session'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { trialEnabled, type TrialCredential } from './trial.ts'
@@ -275,7 +277,7 @@ export async function dropLoginCredentials(loginId: string): Promise<DroppedChat
     deletes.eval(DROP_LOGIN_CHAT, [credentialKey(chatId), ...turnIds.map(id => turnCredentialKey(chatId, id))], [latestSeal ?? ''])
   }
   // Sign-out's permanent tombstone already fences every OAuth-head publication.
-  deletes.del(loginKey(loginId), prefixed(`auth:credential:${loginId}`))
+  deletes.del(loginKey(loginId), prefixed(loginCredentialKey(loginId)))
   const results = await deletes.exec() as unknown[]
   return owned.map(({ chatId, latestSeal }, index): DroppedChat => {
     const [turns, latest] = results[index] as [number, number]
