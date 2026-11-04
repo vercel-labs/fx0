@@ -49,6 +49,7 @@ const expectedLogTag = (kind, value, secret = process.env.SESSION_SECRET) => {
 const protocol = await import('../lib/auth-protocol.ts')
 const secure = await import('../lib/secure-session.ts')
 const auth = await import('../lib/auth.ts')
+const logoutCredentials = await import('../lib/turn-credential.ts')
 const { withRequestSession } = await import('../lib/request-session.ts')
 const { withChatRoute, withUserRoute } = await import('../lib/route-auth.ts')
 const noRevocations = () => ({ ids: new Set(), checks: [], fail: false })
@@ -484,6 +485,12 @@ function redisRest(options) {
     const [command, ...rest] = args
     const op = command.toUpperCase()
     if (op === 'GET') return redisValues.get(rest[0]) ?? null
+    if (op === 'SMEMBERS') return [] // This fixture owns no chat credential index.
+    if (op === 'DEL') return rest.reduce((count, key) => {
+      const deleted = redisValues.delete(key)
+      redisExpirations.delete(key)
+      return count + Number(deleted)
+    }, 0)
     if (op === 'SET') {
       if (rest.some((arg) => String(arg).toUpperCase() === 'NX') && redisValues.has(rest[0])) return null
       redisValues.set(rest[0], rest[1])
@@ -908,6 +915,36 @@ for (const recovery of ['exact', 'published', 'ambiguous', 'missing', 'invalid']
       assert.deepEqual(preserved.grant.credentialPublication, pending.grant.credentialPublication)
     }
   }
+})
+
+test('logout deletes the durable head and a late refresh cannot recreate it', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 })
+  const used = []
+  let removedBeforeRefreshReturned = false
+  mockRefreshNetwork(t, async (options) => {
+    used.push(options.body.get('refresh_token'))
+    if (used.length === 2) {
+      await logoutCredentials.revokeLoginCredentials(session().loginId)
+      await logoutCredentials.dropLoginCredentials(session().loginId)
+      removedBeforeRefreshReturned = !redisValues.has(latestCredentialKey())
+    }
+    return Response.json(tokenResponse({ refresh_token: `cleanup-refresh-${used.length}` }))
+  })
+  const source = await requestWithSession('/api/prompt', session({ refreshToken: 'cleanup-refresh-seed' }))
+  await requestSession(source)
+  assert.equal(redisValues.has(latestCredentialKey()), true)
+  t.mock.timers.setTime(Date.now() + 2 * 3600_000)
+  const late = await requestSession(source)
+  assert.equal(late.status, 200)
+  assert.equal(removedBeforeRefreshReturned, true, 'cleanup deletes the current head before the in-flight provider response returns')
+  assert.deepEqual(handledRequests.get(late).session, {})
+  assert.equal(redisValues.has(latestCredentialKey()), false, 'a late publication cannot recreate the deleted head')
+  assert.equal(redisValues.get(revokedCredentialKey()), '1')
+  assert.equal(redisExpirations.has(revokedCredentialKey()), false, 'deletion never removes or expires the revocation marker')
+  const replay = await withUserRoute(() => assert.fail('revoked credentials must not reach a protected handler'))(
+    new NextRequest(source.url, { headers: source.headers }))
+  assert.equal(replay.status, 401)
+  assert.deepEqual(used, ['cleanup-refresh-seed', 'cleanup-refresh-1'])
 })
 
 test('logout during rotation atomically fences publication and cannot resurrect the login', async (t) => {

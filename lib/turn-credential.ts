@@ -9,8 +9,8 @@ import { trialEnabled, type TrialCredential } from './trial.ts'
 // cookie from. So the prompt route leaves the sender's AI Gateway credential
 // here, pinned to the turn its message starts, and the agent's fetch bills each
 // model request to its turn's credential: the access token and team only,
-// sealed with SESSION_SECRET and expiring with the token. The refresh token
-// never leaves the cookie, and no credential is logged. Deleting this module,
+// sealed with SESSION_SECRET and expiring with the token. This store never
+// holds refresh tokens, and no credential is logged. Deleting this module,
 // and the fetch that reads it, bills the deployment instead.
 interface UserTurnCredential {
   userId: string
@@ -253,9 +253,9 @@ return {turns, latest}
 // became of the chat's latest credential.
 export interface DroppedChat { chatId: string; turns: number; latest: 'deleted' | 'replaced' | 'not-this-login' }
 
-// Sign-out: removes every chat credential this login stored, but not one a later
-// prompt from another login of the user has since replaced. Cancels nothing:
-// a turn this login funded stops at its next model request.
+// Sign-out: removes this login's OAuth head and chat credentials, but not one a
+// later prompt from another login of the user has since replaced. Cancels
+// nothing: a turn this login funded stops at its next model request.
 export async function dropLoginCredentials(loginId: string): Promise<DroppedChat[]> {
   const chats = (await redis().smembers(loginKey(loginId))) ?? []
   // One round trip reads every chat's credential and funding; a second deletes,
@@ -274,7 +274,8 @@ export async function dropLoginCredentials(loginId: string): Promise<DroppedChat
   for (const { chatId, turnIds, latestSeal } of owned) {
     deletes.eval(DROP_LOGIN_CHAT, [credentialKey(chatId), ...turnIds.map(id => turnCredentialKey(chatId, id))], [latestSeal ?? ''])
   }
-  deletes.del(loginKey(loginId))
+  // Sign-out's permanent tombstone already fences every OAuth-head publication.
+  deletes.del(loginKey(loginId), prefixed(`auth:credential:${loginId}`))
   const results = await deletes.exec() as unknown[]
   return owned.map(({ chatId, latestSeal }, index): DroppedChat => {
     const [turns, latest] = results[index] as [number, number]
