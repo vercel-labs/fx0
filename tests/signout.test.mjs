@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
 import test from 'node:test'
 import { NextRequest } from 'next/server.js'
+import { sealData } from 'iron-session'
 
 const dataUrl = (source) => `data:text/javascript,${encodeURIComponent(source)}`
 registerHooks({ resolve(specifier, context, next) {
@@ -152,6 +153,37 @@ test('logout waits for one durable revocation write, then returns before cleanup
   assert.equal(state.values.has('signout-test:credential:laptop-chat'), false)
   assert.equal(fetch.mock.callCount(), 1, 'provider failure cannot restore the deleted credential')
   assert.equal(await credentialOf('laptop-chat', 1), null)
+})
+
+for (const hasChats of [false, true]) test(`logout erases the login-wide credential with ${hasChats ? 'existing' : 'no'} chats and preserves another login`, async (t) => {
+  const state = fixture(t)
+  const laptop = session('a'.repeat(32)), phone = session('b'.repeat(32))
+  if (hasChats) {
+    await credentials.saveTurnCredential('laptop-chat', laptop, 1)
+    await credentials.saveTurnCredential('phone-chat', phone, 1)
+  }
+  const headKey = (login) => `signout-test:auth:credential:${login.loginId}`
+  for (const login of [laptop, phone]) {
+    const key = headKey(login)
+    state.values.set(key, await sealData({ key, userId: login.userId, loginId: login.loginId, loginAt: login.loginAt,
+      accessToken: login.accessToken, refreshToken: `synthetic-refresh-${login.loginId}`, expiresAt: login.expiresAt,
+      validUntil: Date.now() + 30 * 24 * 3600_000 }, { password: process.env.SESSION_SECRET, ttl: 30 * 24 * 3600 }))
+  }
+  const phoneHead = state.values.get(headKey(phone))
+  t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 503 }))
+  const response = await signout(await request(laptop))
+  assert.equal(response.status, 200)
+  assert.equal(await credentials.loginRevoked(laptop.loginId), true, 'revocation precedes background cleanup')
+  assert.equal(state.values.has(headKey(laptop)), true, 'head deletion does not delay the logout response')
+  await state.after[0]()
+  assert.equal(state.values.has(headKey(laptop)), false, 'successful cleanup erases the encrypted access and refresh tokens')
+  assert.equal(state.values.get(headKey(phone)) === phoneHead, true, 'another login of the same user keeps its exact credential')
+  assert.equal(await credentials.loginRevoked(laptop.loginId), true, 'the permanent tombstone survives credential deletion')
+  assert.equal(await credentials.loginRevoked(phone.loginId), false)
+  if (hasChats) {
+    assert.equal(await credentialOf('laptop-chat', 1), null)
+    assert.equal((await credentialOf('phone-chat', 1)).loginId, phone.loginId)
+  }
 })
 
 test('pending logout hides the old grant from normal readers but still revokes it on retry', async (t) => {

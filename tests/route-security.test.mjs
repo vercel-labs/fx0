@@ -38,7 +38,7 @@ const mocks = {
   `,
   'lib/auth.ts': `
     import { AuthError } from './accounts.ts';
-    export { needsTokenRefresh, refreshAccessToken, sessionWithRefresh } from ${JSON.stringify(new URL('../lib/auth.ts?security-original', import.meta.url).href)};
+    export { authRedis, needsTokenRefresh, refreshAccessToken, sessionWithRefresh } from ${JSON.stringify(new URL('../lib/auth.ts?security-original', import.meta.url).href)};
     export async function requireUserSession() {
       const s = globalThis.securityTest; s.trace.push('auth');
       if (!s.session) throw new AuthError(); return s.session;

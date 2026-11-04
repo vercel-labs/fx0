@@ -79,7 +79,9 @@ function browserCookies(initial) {
   }
 }
 
+const encodeRedisResult = (value) => typeof value === 'string' && value !== 'OK' ? Buffer.from(value).toString('base64') : value
 const redisValues = new Map()
+test.beforeEach(() => { redisValues.clear() })
 function redisResponse(options) {
   const execute = ([command, ...args]) => {
     switch (command.toUpperCase()) {
@@ -88,15 +90,24 @@ function redisResponse(options) {
         if (args.includes('NX') && redisValues.has(args[0])) return null
         redisValues.set(args[0], args[1]); return 'OK'
       case 'EVAL': {
-        const [, , lock, result, owner, value] = args
-        if (redisValues.get(lock) !== owner) return 0
-        redisValues.set(result, value); redisValues.delete(lock); return 1
+        const [script, count, ...items] = args
+        const keys = items.slice(0, Number(count))
+        const argv = items.slice(Number(count))
+        if (script.includes('auth-credential:read')) return redisValues.has(keys[1]) ? -1 : redisValues.get(keys[0]) ?? null
+        if (script.includes('auth-credential:publish')) {
+          if (redisValues.has(keys[1])) return -1
+          if ((redisValues.get(keys[0]) ?? '') !== argv[0]) return 0
+          redisValues.set(keys[0], argv[1]); return 1
+        }
+        if (redisValues.get(keys[0]) !== argv[0]) return 0
+        if (keys.length > 1) redisValues.set(keys[1], argv[1])
+        redisValues.delete(keys[0]); return 1
       }
       default: assert.fail('Unexpected Redis command')
     }
   }
   const body = JSON.parse(options.body)
-  return Response.json(Array.isArray(body[0]) ? body.map((args) => ({ result: execute(args) })) : { result: execute(body) })
+  return Response.json(Array.isArray(body[0]) ? body.map((args) => ({ result: encodeRedisResult(execute(args)) })) : { result: encodeRedisResult(execute(body)) })
 }
 
 function assertFlowCleared(response) {

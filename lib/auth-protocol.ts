@@ -17,8 +17,8 @@ export function logAuthFailure(event: string, error: unknown): void {
   console.error(JSON.stringify({ at: new Date().toISOString(), event, error: message }))
 }
 
-// Login, renewal and sign-out trail. Values are logTag hashes, statuses and
-// OAuth error codes, never credentials or provider bodies.
+// Login, renewal and sign-out trail. Values are keyed logTag fingerprints,
+// statuses and OAuth error codes, never credentials or provider bodies.
 export function logAuth(event: string, detail: Record<string, unknown> = {}, level: 'info' | 'error' = 'info'): void {
   console[level](JSON.stringify({ at: new Date().toISOString(), event, ...detail }))
 }
@@ -34,6 +34,11 @@ export function isLoginId(value: unknown): value is string {
 export function grantCookieName(loginId: string): string {
   if (!isLoginId(loginId)) throw new Error('Invalid login ID')
   return `${GRANT_COOKIE_PREFIX}${loginId}`
+}
+
+// Namespace-relative Redis key shared by credential publication and logout cleanup.
+export function loginCredentialKey(loginId: string): string {
+  return `auth:credential:${loginId}`
 }
 
 // @ts-expect-error Node strip-types tests require the source extension.

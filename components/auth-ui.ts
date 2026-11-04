@@ -51,10 +51,32 @@ export function uiAuthError(): AuthRouteError | null {
   return authFailure
 }
 
+// Document-local correlation only, never proof of a session or persisted identity.
+let authPage: string | undefined
+
+function authContextHeaders(headers?: HeadersInit): HeadersInit | undefined {
+  try {
+    if (typeof document === 'undefined') return headers
+    const prerendering = (document as Document & { prerendering?: boolean }).prerendering
+    const visibility = document.visibilityState
+    authPage ??= globalThis.crypto?.randomUUID?.()
+    if (!authPage) return headers
+    const context = new Headers(headers)
+    context.set('x-fx0-auth-page', authPage)
+    context.set('x-fx0-auth-prerender', prerendering === true ? '1' : prerendering === false ? '0' : 'unknown')
+    context.set('x-fx0-auth-visibility', visibility === 'visible' || visibility === 'hidden' ? visibility : 'unknown')
+    return context
+  } catch {
+    // Optional browser diagnostics must never prevent the underlying request.
+    return headers
+  }
+}
+
 export async function fetchUi(input: string, init?: RequestInit): Promise<Response> {
   if (authFailure) throw authFailure
   const signal = init?.signal ? AbortSignal.any([init.signal, authRequests.signal]) : authRequests.signal
-  const response = await fetch(input, { ...init, signal })
+  const headers = input.startsWith('/api/') && !input.includes('\\') ? authContextHeaders(init?.headers) : init?.headers
+  const response = await fetch(input, { ...init, headers, signal })
   if (authFailure) {
     void response.body?.cancel().catch(() => {})
     throw authFailure

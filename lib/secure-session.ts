@@ -18,6 +18,8 @@ export interface SessionData {
   picture?: string
   accessToken: string
   refreshToken?: string
+  // Only present when a provider rotation has not yet reached durable storage.
+  credentialPublication?: { previous: string; previousToken?: string; validUntil: number }
   expiresAt: number
   teamId?: string
   teamSlug?: string

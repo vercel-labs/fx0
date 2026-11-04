@@ -141,7 +141,7 @@ export function createRefreshCoordinator(boundary: { fetch: typeof fetch; cache:
   async function exchange(refreshToken: string): Promise<RefreshResult> {
     const clientId = process.env.VERCEL_OAUTH_CLIENT_ID
     const clientSecret = process.env.VERCEL_OAUTH_CLIENT_SECRET
-    const rt = logTag(refreshToken)
+    const rt = logTag('refresh', refreshToken)
     if (!clientId || !clientSecret) {
       logAuth('auth:refresh:unconfigured', {}, 'error')
       return { status: 'transient' }
@@ -165,7 +165,7 @@ export function createRefreshCoordinator(boundary: { fetch: typeof fetch; cache:
       // ID tokens are not needed by refresh and must not inflate cached results.
       const tokens = { access_token: body.access_token, refresh_token: body.refresh_token, expires_in: body.expires_in }
       // rt -> next links a later rejection of rt to this exchange (a replayed token).
-      logAuth('auth:refresh:exchanged', { rt, next: logTag(tokens.refresh_token ?? refreshToken), expiresIn: tokens.expires_in })
+      logAuth('auth:refresh:exchanged', { rt, next: logTag('refresh', tokens.refresh_token ?? refreshToken), expiresIn: tokens.expires_in })
       return { status: 'ok', tokens, expiresAt: Date.now() + tokens.expires_in * 1000 }
     } catch (error) {
       logAuth('auth:refresh:error', { rt, error: (error as Error)?.name ?? 'Error' }, 'error')
@@ -174,7 +174,7 @@ export function createRefreshCoordinator(boundary: { fetch: typeof fetch; cache:
   }
 
   async function coordinated(refreshToken: string, key: string): Promise<RefreshResult> {
-    const rt = logTag(refreshToken)
+    const rt = logTag('refresh', refreshToken)
     try {
       const password = getSessionOptions().password
       async function cached(): Promise<RefreshResult | null> {
@@ -244,7 +244,7 @@ export function createRefreshCoordinator(boundary: { fetch: typeof fetch; cache:
 }
 
 let refreshRedis: Redis | undefined
-function redis(): Redis {
+export function authRedis(): Redis {
   if (!refreshRedis) {
     const url = process.env.KV_REST_API_URL
     const token = process.env.KV_REST_API_TOKEN
@@ -257,16 +257,16 @@ function redis(): Redis {
 export const refreshAccessToken = createRefreshCoordinator({
   fetch: (...args) => fetch(...args),
   cache: {
-    get: (key) => redis().get<string>(`${key}:result`),
-    acquire: async (key, owner, ttl) => await redis().set(`${key}:lock`, owner, { nx: true, ex: ttl }) === 'OK',
-    publish: async (key, owner, value, ttl) => await redis().eval<[string, string, number], number>(`
+    get: (key) => authRedis().get<string>(`${key}:result`),
+    acquire: async (key, owner, ttl) => await authRedis().set(`${key}:lock`, owner, { nx: true, ex: ttl }) === 'OK',
+    publish: async (key, owner, value, ttl) => await authRedis().eval<[string, string, number], number>(`
       if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
       redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
       redis.call('DEL', KEYS[1])
       return 1
     `, [`${key}:lock`, `${key}:result`], [owner, value, ttl]) === 1,
     release: async (key, owner) => {
-      await redis().eval<[string], number>(`
+      await authRedis().eval<[string], number>(`
         if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
         return 0
       `, [`${key}:lock`], [owner])
