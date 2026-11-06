@@ -15,3 +15,9 @@ const maxDuration = async route => {
 test('the typing warm-up shares the prompt route\'s function configuration', async () => {
   assert.equal(await maxDuration('warm'), await maxDuration('prompt'))
 })
+
+// Capture uploads can reuse the prompt/warm function's pool. This config equality
+// does not promise instance affinity: a durable turn can also execute in /api/libfx.
+test('the screenshot upload shares the prompt route\'s function configuration', async () => {
+  assert.equal(await maxDuration('capture'), await maxDuration('prompt'))
+})
