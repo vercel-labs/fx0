@@ -102,8 +102,10 @@ interface ServerTiming {
 
 /**
  * One capture, end to end, in whole milliseconds, as the tool call logs it (capture:trace).
- * Each part is measured on one clock, except delivery, upload and store-and-wake, which
- * compare two machines' clocks; delivery plus upload (networkMs) is exact all the same.
+ * Local durations are measured on one clock. Delivery, upload and store-and-wake are
+ * estimates comparing machines' clocks. networkMs cancels a fixed browser clock offset,
+ * but not differences between the upload and turn servers. It includes transport and
+ * delivery queues, not just wire time; negative one-way estimates can indicate clock skew.
  */
 export function captureTrace(server: ServerTiming, shot: ShotTiming) {
   const ms = (n: number) => Math.round(n)

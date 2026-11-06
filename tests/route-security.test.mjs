@@ -60,6 +60,7 @@ const mocks = {
     export async function getSessionFromRequest() { return globalThis.securityTest.session ?? {}; }
   `,
   'lib/session.ts': `
+    export const INSTANCE = 'test-instance';
     export const DEFAULT_MODEL = 'test/default';
     export const effectiveModel = host => host.preferredModel ?? 'anthropic/claude-opus-5.5-fast';
     export const effectiveEffort = host => host.preferredEffort ?? 'low';
@@ -437,6 +438,8 @@ test('a tab acknowledges a capture and reports a known failure; an unknown reaso
   }))
   const ack = await post('ack=1')
   assert.equal(ack.status, 200)
+  assert.match(ack.headers.get('server-timing'), /^route;dur=\d+\.\d{2}, authMs;dur=\d+\.\d{2}, storeMs;dur=\d+\.\d{2}$/)
+  assert.equal(ack.headers.get('x-fx0-instance'), 'test-instance')
   assert.deepEqual(await ack.json(), { ok: true })
   assert.ok(s.trace.includes('capture-ack'))
   const failed = await post('failed=too-large')

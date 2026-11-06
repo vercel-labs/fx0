@@ -1,6 +1,7 @@
 import type { StreamItem } from './events'
 import { localEvents, readEvents } from './journal'
 import { readDraft, type DraftCursor } from './draft-store'
+import { log } from './session'
 
 interface EventStreamOptions {
   afterSeq?: number
@@ -53,7 +54,7 @@ export function createSessionEventStream(sessionId: string, options: EventStream
       }
       // Delivery is in seq order and exactly once: the cursor only advances, and any
       // item at or below it, from either source, has already been sent.
-      const deliver = (item: StreamItem): boolean => {
+      const deliver = (item: StreamItem, source: 'local' | 'poll', timing?: { journalReadMs: number; draftReadMs?: number; pollScheduledDelayMs: number }): boolean => {
         if (typeof item.seq === 'number') {
           if (item.seq <= cursor) return false
           cursor = item.seq
@@ -61,6 +62,14 @@ export function createSessionEventStream(sessionId: string, options: EventStream
         if (item.type === 'turn_start') running = true
         if (item.type === 'done' || item.type === 'error') running = false
         send(`id: ${item.seq ?? ''}\ndata: ${JSON.stringify(item)}\n\n`)
+        if (!stopped && item.type === 'capture') {
+          log(sessionId, 'capture:delivery', {
+            source, seq: item.seq, cid: item.cid, writerInstance: item.instance,
+            // Cross-instance wall clocks can differ; this is not a measured duration.
+            eventAgeWallEstimateMs: typeof item.at === 'number' ? Date.now() - item.at : undefined,
+            ...timing,
+          })
+        }
         if (options.closeWhen?.(item)) {
           close()
           return true
@@ -76,10 +85,10 @@ export function createSessionEventStream(sessionId: string, options: EventStream
         close()
       }
       // Every poll starts here, so no poll's failure goes unhandled.
-      const pollSoon = () => {
-        void poll().catch(fail)
+      const pollSoon = (pollScheduledDelayMs = 0) => {
+        void poll(pollScheduledDelayMs).catch(fail)
       }
-      const poll = async () => {
+      const poll = async (pollScheduledDelayMs: number) => {
         if (stopped) return
         if (polling) {
           pollAgain = true
@@ -89,17 +98,37 @@ export function createSessionEventStream(sessionId: string, options: EventStream
         if (pollTimer) clearTimeout(pollTimer)
         pollTimer = null
         try {
-          const [items, draft] = await Promise.all([readEvents(sessionId, cursor), readDraft(sessionId, draftCursor).catch(() => null)])
+          let journalReadMs = 0
+          let draftReadMs: number | undefined
+          const journalStarted = performance.now()
+          const journalRead = readEvents(sessionId, cursor).then((items) => {
+            journalReadMs = Math.round(performance.now() - journalStarted)
+            return items
+          })
+          const draftStarted = performance.now()
+          const draftRead = readDraft(sessionId, draftCursor).catch(() => null).then((draft) => {
+            draftReadMs = Math.round(performance.now() - draftStarted)
+            return draft
+          })
+          // Journal events (including capture requests) do not depend on a draft read.
+          // Start both reads together, but do not hold a ready event behind the draft.
+          const items = await journalRead
+          const timing = { journalReadMs, ...(draftReadMs === undefined ? {} : { draftReadMs }), pollScheduledDelayMs }
           for (const item of items) {
-            if (stopped || deliver(item)) return
+            if (stopped || deliver(item, 'poll', timing)) return
           }
+          if (stopped) return
+          const draft = await draftRead
           if (stopped) return
           if (draft) {
             draftCursor = draft.cursor
             if (!draft.item.draftClosed) running = true
-            deliver(draft.item)
+            deliver(draft.item, 'poll', timing)
           }
-          pollDelayMs = items.length > 0 || draft ? 100 : Math.min(running ? 150 : options.maxIdleMs ?? 1000, Math.ceil(pollDelayMs * 1.5))
+          // Active turns trade a bounded extra read rate for prompt tool delivery.
+          // Inactive chats retain the original 100ms reset and idle backoff.
+          pollDelayMs = items.length > 0 || draft ? (running ? 50 : 100)
+            : Math.min(running ? 75 : options.maxIdleMs ?? 1000, Math.ceil(pollDelayMs * 1.5))
         } finally {
           polling = false
         }
@@ -109,7 +138,7 @@ export function createSessionEventStream(sessionId: string, options: EventStream
           pollSoon()
           return
         }
-        pollTimer = setTimeout(pollSoon, pollDelayMs)
+        pollTimer = setTimeout(pollSoon, pollDelayMs, pollDelayMs)
       }
 
       // Same-process commits arrive here as they land. The next item in sequence is
@@ -118,8 +147,8 @@ export function createSessionEventStream(sessionId: string, options: EventStream
       onLocal = (item) => {
         if (stopped || typeof item.seq !== 'number' || item.seq <= cursor) return
         if (item.seq === cursor + 1) {
-          deliver(item)
-          pollDelayMs = 100
+          deliver(item, 'local')
+          pollDelayMs = running ? 50 : 100
         } else {
           pollSoon()
         }

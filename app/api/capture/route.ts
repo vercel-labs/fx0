@@ -2,7 +2,11 @@ import { CAPTURE_FAILURES, CAPTURE_TIMING_HEADER, MAX_CAPTURE_BYTES, MAX_CAPTURE
 import { imageDimensions, sniffImageType } from '../../../lib/image-sniff'
 import { acknowledgeCapture, answerCapture } from '../../../lib/journal'
 import { withSessionRoute } from '../../../lib/route-auth'
-import { log } from '../../../lib/session'
+import { INSTANCE, log } from '../../../lib/session'
+
+// Match /api/prompt so this route can share its function's warm instances.
+// The platform still decides which instance handles each request.
+export const maxDuration = 800
 
 const CAPTURE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const CAPTURE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
@@ -31,12 +35,19 @@ function tabTiming(header: string | null): TabTiming | null {
 // request, then either `?failed=<reason>` or the photo itself, one image or a full page's
 // tiles, as multipart form data. Every reply counts only for the capture the tool call is
 // waiting on; `ok: false` tells the tab it is no longer open.
-const handle = (arrivedAt: number, arrived: number) => withSessionRoute(async (request, { id: sessionId }) => {
-  const authMs = performance.now() - arrived
+type CaptureRouteTiming = { authMs?: number; readMs?: number; storeMs?: number }
+
+const handle = (arrivedAt: number, arrived: number, metrics: CaptureRouteTiming) => withSessionRoute(async (request, { id: sessionId }) => {
+  const authMs = metrics.authMs = performance.now() - arrived
   const params = new URL(request.url).searchParams
   const cid = params.get('cid') ?? ''
   if (!CAPTURE_ID.test(cid)) return Response.json({ error: 'invalid capture' }, { status: 400 })
-  if (params.get('ack') === '1') return Response.json({ ok: await acknowledgeCapture(sessionId, cid) })
+  if (params.get('ack') === '1') {
+    const storing = performance.now()
+    const ok = await acknowledgeCapture(sessionId, cid)
+    metrics.storeMs = performance.now() - storing
+    return Response.json({ ok })
+  }
   const failed = params.get('failed')
   if (failed !== null) {
     if (!Object.hasOwn(CAPTURE_FAILURES, failed)) return Response.json({ error: 'invalid capture' }, { status: 400 })
@@ -77,7 +88,7 @@ const handle = (arrivedAt: number, arrived: number) => withSessionRoute(async (r
     }
     images.push({ mimeType, data: Buffer.from(bytes).toString('base64') })
   }
-  const readMs = performance.now() - reading
+  const readMs = metrics.readMs = performance.now() - reading
   // The viewport the tab photographed only labels the photo for the model.
   const size = (name: string) => { const n = Number(params.get(name)); return Number.isInteger(n) && n > 0 && n <= MAX_SIDE ? n : undefined }
   const tab = tabTiming(request.headers.get(CAPTURE_TIMING_HEADER))
@@ -87,9 +98,20 @@ const handle = (arrivedAt: number, arrived: number) => withSessionRoute(async (r
   const accepted = await answerCapture(sessionId, cid, {
     kind: 'shot', shot: { images, width: size('w'), height: size('h'), truncated: params.get('truncated') === '1', timing },
   })
+  metrics.storeMs = performance.now() - submitting
   // Not accepted: the call stopped waiting (closed by a timeout, a cancel or an earlier answer).
-  log(sessionId, accepted ? 'capture:accepted' : 'capture:closed', { images: images.length, bytes, submitMs: Math.round(performance.now() - submitting) })
+  log(sessionId, accepted ? 'capture:accepted' : 'capture:closed', { images: images.length, bytes, submitMs: Math.round(metrics.storeMs) })
   return Response.json({ ok: accepted })
 })
 
-export const POST = (request: Request) => handle(Date.now(), performance.now())(request)
+export async function POST(request: Request): Promise<Response> {
+  const started = performance.now()
+  const metrics: CaptureRouteTiming = {}
+  const response = await handle(Date.now(), started, metrics)(request)
+  const timings = { route: performance.now() - started, ...metrics }
+  response.headers.set('server-timing', Object.entries(timings)
+    .filter(([, value]) => Number.isFinite(value))
+    .map(([name, value]) => `${name};dur=${value!.toFixed(2)}`).join(', '))
+  response.headers.set('x-fx0-instance', INSTANCE)
+  return response
+}
