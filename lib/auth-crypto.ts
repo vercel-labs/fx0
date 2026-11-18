@@ -10,7 +10,7 @@ export function hashHandle(value: string): string {
 
 // Purpose-separated HMAC tags correlate logs only within the same kind.
 // Missing log key material must not block authentication or expose unkeyed tags.
-export function logTag(kind: 'user' | 'login' | 'refresh' | 'cookie' | 'page' | 'team', value: string): string | null {
+export function logTag(kind: 'user' | 'login' | 'refresh' | 'cookie' | 'page', value: string): string | null {
   const secret = process.env.SESSION_SECRET
   if (!secret || secret.length < 32) return null
   const key = createHmac('sha256', secret).update('fx0:auth-log-key:v1').digest()
