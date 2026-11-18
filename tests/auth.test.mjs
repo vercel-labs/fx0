@@ -135,7 +135,7 @@ test('log fingerprints are 96-bit keyed tags separated by data kind, without cha
   const secret = process.env.SESSION_SECRET
   t.after(() => { process.env.SESSION_SECRET = secret })
   const value = 'synthetic-correlation-value'
-  const kinds = ['user', 'login', 'refresh', 'cookie', 'page', 'team']
+  const kinds = ['user', 'login', 'refresh', 'cookie', 'page']
   const tags = kinds.map((kind) => authCrypto.logTag(kind, value))
   assert.equal(new Set(tags).size, kinds.length, 'the same value cannot be linked across different data kinds')
   for (const [index, kind] of kinds.entries()) {
@@ -159,7 +159,7 @@ test('missing or invalid log key omits fingerprints without falling back to raw 
   for (const unavailable of [undefined, '', 'too-short']) {
     if (unavailable === undefined) delete process.env.SESSION_SECRET
     else process.env.SESSION_SECRET = unavailable
-    for (const kind of ['user', 'login', 'refresh', 'cookie', 'page', 'team']) {
+    for (const kind of ['user', 'login', 'refresh', 'cookie', 'page']) {
       assert.equal(authCrypto.logTag(kind, 'do-not-log-this-value'), null)
     }
     assert.equal(authCrypto.hashHandle('storage-value'), createHash('sha256').update('storage-value').digest('hex'))
@@ -1330,10 +1330,6 @@ test('signin uses trusted APP_URL, required scopes and PKCE, and one encrypted s
   assert.ok(cookie)
   const flow = await unsealData(cookie.value, { password: process.env.SESSION_SECRET, ttl: protocol.FLOW_TTL_SECONDS })
   assert.equal(flow.state, url.searchParams.get('state'))
-  assert.equal(flow.consent, true, 'the callback knows this sign-in already forced consent')
-  const plain = await signin(new NextRequest('https://fx0.example/api/auth/signin'))
-  assert.equal(new URL(plain.headers.get('location')).searchParams.get('prompt'), null)
-  assert.equal((await unsealData(plain.cookies.get(protocol.FLOW_COOKIE_NAME).value, { password: process.env.SESSION_SECRET, ttl: protocol.FLOW_TTL_SECONDS })).consent, false)
   assert.equal(flow.nonce, url.searchParams.get('nonce'))
   assert.equal(createHash('sha256').update(flow.codeVerifier).digest('base64url'), url.searchParams.get('code_challenge'))
   assert.ok(!cookie.value.includes(flow.codeVerifier))

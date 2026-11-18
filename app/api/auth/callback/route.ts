@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { unsealData } from 'iron-session'
 import { NextResponse, type NextRequest } from 'next/server'
 import { AuthError, upsertAccount } from '@/lib/accounts'
-import { getGrantedTeam, publicUser, type TeamProbe } from '@/lib/auth'
+import { getGrantedTeam, publicUser } from '@/lib/auth'
 import { logTag } from '@/lib/auth-crypto'
 import { getSessionOptions, sealSessionCookie, selectorCookie, type SessionData } from '@/lib/secure-session'
 import { signedInHintCookie, signOutPendingCookie } from '@/lib/session-cookies'
@@ -16,7 +16,6 @@ export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams
   let response: NextResponse
   let origin: string | undefined
-  let consentRetry = false
   const sessionCookies: string[] = []
   try {
     origin = requestOrigin(request)
@@ -42,20 +41,7 @@ export async function GET(request: NextRequest) {
     }
     const expiresAt = Date.now() + tokens.expires_in * 1000
     const identity = await verifyVercelIdToken(tokens.id_token, { clientId, nonce: flow.nonce })
-    const probes: TeamProbe[] = []
-    const team = await getGrantedTeam(tokens.access_token, probes).catch((error: unknown) => {
-      if (!(error instanceof AuthError) || error.status !== 403) throw error
-      // Vercel skips its consent page for an app the user already authorized, so
-      // a team that needs a fresh SSO or Gateway grant is never offered again and
-      // every probe is refused. Forcing the consent page once lets the user grant
-      // it; a sign-in that already forced it shows the error.
-      consentRetry = flow.consent !== true
-      const statuses: Record<string, number> = {}
-      for (const { status } of probes) statuses[status] = (statuses[status] ?? 0) + 1
-      logAuth('auth:callback:no-gateway-team', { user: logTag('user', identity.userId), consent: flow.consent === true,
-        retry: consentRetry, teams: probes.length, statuses, probes: probes.slice(0, 20) }, 'error')
-      throw error
-    })
+    const team = await getGrantedTeam(tokens.access_token)
     const session: SessionData = { ...identity, ...team, loginId: randomBytes(16).toString('hex'), loginAt: Date.now(),
       accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiresAt, isLoggedIn: true }
     // Parent-owned account persistence receives identity only, never credentials.
@@ -75,11 +61,9 @@ export async function GET(request: NextRequest) {
       replaced: isLoginId(previous) && previous !== session.loginId ? logTag('login', previous) : null })
   } catch (error) {
     logAuthFailure('auth:callback:failed', error)
-    response = !origin
-      ? new NextResponse(null, { status: 307, headers: { Location: SIGN_IN_UNAVAILABLE_PATH } })
-      : consentRetry
-        ? NextResponse.redirect(new URL('/api/auth/signin?reauth=true', origin))
-        : NextResponse.redirect(new URL(`/login?error=${error instanceof AuthError && error.status === 403 ? 'team_access' : 'signin_failed'}`, origin))
+    response = origin
+      ? NextResponse.redirect(new URL(`/login?error=${error instanceof AuthError && error.status === 403 ? 'team_access' : 'signin_failed'}`, origin))
+      : new NextResponse(null, { status: 307, headers: { Location: SIGN_IN_UNAVAILABLE_PATH } })
   }
   // All exits, including provider denial, malformed state, and config errors.
   response.cookies.set(FLOW_COOKIE_NAME, '', { ...FLOW_COOKIE_OPTIONS, maxAge: 0 })

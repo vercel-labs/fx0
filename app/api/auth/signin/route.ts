@@ -11,7 +11,7 @@ export async function GET(request: NextRequest) {
     const clientId = process.env.VERCEL_OAUTH_CLIENT_ID
     if (!clientId || !process.env.VERCEL_OAUTH_CLIENT_SECRET) throw new Error('OAuth is not configured')
     const origin = requestOrigin(request)
-    const flow: OAuthFlow = { purpose: 'oauth', state: randomHandle(), nonce: randomHandle(), codeVerifier: randomHandle(), createdAt: Date.now(), consent: reauth }
+    const flow: OAuthFlow = { purpose: 'oauth', state: randomHandle(), nonce: randomHandle(), codeVerifier: randomHandle(), createdAt: Date.now() }
     const url = new URL('https://vercel.com/oauth/authorize')
     url.search = new URLSearchParams({
       client_id: clientId, redirect_uri: `${origin}/api/auth/callback`, response_type: 'code',

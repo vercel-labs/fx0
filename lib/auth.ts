@@ -3,7 +3,7 @@ import { sealData, unsealData } from 'iron-session'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { AuthError, type AccountUser } from './accounts.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { hashHandle, logTag, randomHandle, redactSecrets } from './auth-crypto.ts'
+import { hashHandle, logTag, randomHandle } from './auth-crypto.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { getSession, getSessionOptions, isAuthenticatedSession, type SessionData } from './secure-session.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
@@ -28,28 +28,9 @@ export interface GrantedTeam { teamId: string; teamSlug: string }
 // sealed into a cookie: only the GrantedTeam fields are.
 export interface GatewayTeam extends GrantedTeam { balance: number | null }
 
-// What one team's Gateway probe answered, for the sign-in failure log. The team is
-// a keyed log tag; type, code and message come from Gateway's error JSON with the
-// token and other long secrets removed, never the raw body.
-export interface TeamProbe { team: string | null; status: number | 'unreachable'; type: string | null; code: string | null; message: string | null }
-
-async function probeError(response: Response, accessToken: string): Promise<Pick<TeamProbe, 'type' | 'code' | 'message'>> {
-  const scrub = (value: unknown, max: number) => typeof value === 'string' && value.trim()
-    ? redactSecrets(value.split(accessToken).join('[redacted]')).replace(/\s+/g, ' ').trim().slice(0, max)
-    : null
-  try {
-    const body = JSON.parse((await response.text()).slice(0, 8192)) as { error?: { type?: unknown; code?: unknown; message?: unknown } | string }
-    const error = typeof body.error === 'string' ? { message: body.error } : body.error ?? {}
-    return { type: scrub(error.type, 64), code: scrub(error.code, 64), message: scrub(error.message, 200) }
-  } catch {
-    return { type: null, code: null, message: null }
-  }
-}
-
 // Membership does not prove Gateway authorization; probe every returned team and
-// never substitute a default team, user ID, or owner's token. `report`, when
-// given, receives each team's answer.
-export async function listGatewayTeams(accessToken: string, report?: TeamProbe[]): Promise<GatewayTeam[]> {
+// never substitute a default team, user ID, or owner's token.
+export async function listGatewayTeams(accessToken: string): Promise<GatewayTeam[]> {
   let cursor: number | undefined
   const seen = new Set<string>()
   const granted: GatewayTeam[] = []
@@ -73,15 +54,12 @@ export async function listGatewayTeams(accessToken: string, report?: TeamProbe[]
           headers: { Authorization: `Bearer ${accessToken}` },
           cache: 'no-store', signal: AbortSignal.timeout(10_000),
         })
-        if (!probe.ok) report?.push({ team: logTag('team', team.id), status: probe.status, ...await probeError(probe, accessToken) })
-        else report?.push({ team: logTag('team', team.id), status: probe.status, type: null, code: null, message: null })
         if (probe.status === 401 || probe.status === 403) return null
         if (!probe.ok) return 'failed' as const
         const { balance } = await probe.json().catch(() => ({})) as { balance?: string }
         const amount = Number(balance)
         return { teamId: team.id, teamSlug: team.slug || team.id, balance: balance != null && Number.isFinite(amount) ? amount : null }
       } catch {
-        report?.push({ team: logTag('team', team.id), status: 'unreachable', type: null, code: null, message: null })
         return 'failed' as const
       }
     }))
@@ -101,8 +79,8 @@ export async function listGatewayTeams(accessToken: string, report?: TeamProbe[]
 
 // Callback default only: the first team Gateway accepts. Users with several can
 // pick another in the account menu (POST /api/teams).
-export async function getGrantedTeam(accessToken: string, report?: TeamProbe[]): Promise<GrantedTeam> {
-  const [first] = await listGatewayTeams(accessToken, report)
+export async function getGrantedTeam(accessToken: string): Promise<GrantedTeam> {
+  const [first] = await listGatewayTeams(accessToken)
   if (!first) throw new AuthError(403, 'Grant a Vercel team with AI Gateway access')
   return { teamId: first.teamId, teamSlug: first.teamSlug }
 }

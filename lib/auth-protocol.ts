@@ -93,9 +93,6 @@ export interface OAuthFlow {
   nonce: string
   codeVerifier: string
   createdAt: number
-  // The sign-in forced Vercel's consent page (prompt=consent), so the callback
-  // does not retry it. Absent on flows started before this was recorded.
-  consent?: boolean
 }
 
 export function validOAuthFlow(flow: Partial<OAuthFlow>, state: string | null, now = Date.now()): flow is OAuthFlow {
@@ -103,8 +100,7 @@ export function validOAuthFlow(flow: Partial<OAuthFlow>, state: string | null, n
     typeof flow.nonce === 'string' && flow.nonce.length > 0 &&
     typeof flow.codeVerifier === 'string' && flow.codeVerifier.length >= 43 &&
     typeof flow.createdAt === 'number' && flow.createdAt <= now &&
-    now - flow.createdAt < FLOW_TTL_SECONDS * 1000 &&
-    (flow.consent === undefined || typeof flow.consent === 'boolean')
+    now - flow.createdAt < FLOW_TTL_SECONDS * 1000
 }
 
 const vercelKeys = createRemoteJWKSet(new URL('https://vercel.com/.well-known/jwks'), { timeoutDuration: 10_000 })
