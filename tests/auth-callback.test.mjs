@@ -181,6 +181,7 @@ test('provider denial, missing code, forged state, expired flow and malformed fl
     ['?code=test-code&state=forged-state', flow()],
     ['?code=test-code&state=test-state', { ...flow(), createdAt: Date.now() - 600_001 }],
     ['?code=test-code&state=test-state', { ...flow(), nonce: undefined }],
+    ['?code=test-code&state=test-state', { ...flow(), consent: 'yes' }],
   ]) {
     const response = await GET(await callbackRequest(query, data))
     assert.equal(response.headers.get('location'), 'https://fx0.example/login?error=signin_failed')
@@ -200,19 +201,53 @@ test('wrong nonce never stores identity or session and still clears flow', async
   assert.deepEqual(writes, [])
 })
 
-test('Gateway permission denial surfaces one team-access error without an owner fallback', async (t) => {
+// Every team refuses the token, as when Vercel skips consent for an app the user
+// already authorized and the team needs a fresh SSO grant.
+async function deniedCallback(t, data) {
   writes.length = 0
   const token = await identityToken()
+  const logs = []
+  t.mock.method(console, 'error', (line) => logs.push(String(line)))
   t.mock.method(globalThis, 'fetch', async (url) => {
+    if (String(url) === 'https://vercel.com/.well-known/jwks') return Response.json({ keys: [jwk] })
     if (String(url) === protocol.TOKEN_ENDPOINT) return Response.json({ access_token: 'callback-access', refresh_token: 'callback-refresh', expires_in: 3600, id_token: token })
-    if (String(url).startsWith('https://api.vercel.com/v2/teams')) return Response.json({ teams: [{ id: 'team_denied' }] })
+    if (String(url).startsWith('https://api.vercel.com/v2/teams')) return Response.json({ teams: [{ id: 'team_denied' }, { id: 'team_saml' }] })
     assert.ok(String(url).startsWith('https://ai-gateway.vercel.sh/v1/credits?teamId='))
-    return Response.json({}, { status: 403 })
+    if (String(url).endsWith('team_saml')) {
+      return Response.json({ error: { type: 'forbidden', code: 'saml_required', message: 'Re-authenticate with SAML to use this team. Token: callback-access' } }, { status: 403 })
+    }
+    return new Response('not json callback-access', { status: 401 })
   })
-  const response = await GET(await callbackRequest())
-  assert.equal(response.headers.get('location'), 'https://fx0.example/login?error=team_access')
+  const response = await GET(await callbackRequest(undefined, data))
   assertFlowCleared(response)
   assert.deepEqual(writes, [])
+  const entry = logs.map((line) => JSON.parse(line)).find(({ event }) => event === 'auth:callback:no-gateway-team')
+  assert.ok(entry, 'the refusal is logged with each team answer')
+  assert.equal(logs.some((line) => line.includes('callback-access') || line.includes('team_saml') || line.includes('signature-verified-sub')), false,
+    'the log never carries the token, a raw team ID or the raw user ID')
+  return { response, entry }
+}
+
+test('a team-access refusal after Vercel skipped consent retries once with the consent page', async (t) => {
+  const { response, entry } = await deniedCallback(t)
+  assert.equal(response.headers.get('location'), 'https://fx0.example/api/auth/signin?reauth=true')
+  assert.equal(entry.retry, true)
+  assert.equal(entry.consent, false)
+  assert.equal(entry.teams, 2)
+  assert.deepEqual(entry.statuses, { 401: 1, 403: 1 })
+  assert.match(entry.user, /^[a-f0-9]{24}$/)
+  const saml = entry.probes.find(({ code }) => code === 'saml_required')
+  assert.match(saml.team, /^[a-f0-9]{24}$/)
+  assert.equal(saml.type, 'forbidden')
+  assert.equal(saml.message, 'Re-authenticate with SAML to use this team. Token: [redacted]')
+  assert.deepEqual(entry.probes.find(({ status }) => status === 401), { team: entry.probes.find(({ status }) => status === 401).team, status: 401, type: null, code: null, message: null })
+})
+
+test('a team-access refusal after the consent page shows the error instead of looping', async (t) => {
+  const { response, entry } = await deniedCallback(t, { ...flow(), consent: true })
+  assert.equal(response.headers.get('location'), 'https://fx0.example/login?error=team_access')
+  assert.equal(entry.retry, false)
+  assert.equal(entry.consent, true)
 })
 
 const oldSession = (refreshToken) => ({
