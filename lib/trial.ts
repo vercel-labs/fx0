@@ -81,14 +81,35 @@ export async function clearGuestSession(): Promise<void> {
   ;(await cookies()).delete(GUEST_COOKIE)
 }
 
+// The network an allowance belongs to. An IPv4 address is one network. An IPv6
+// connection is normally given a whole /64 and can send from any address in it,
+// so every address in a /64 shares one allowance. An IPv4-mapped IPv6 address
+// counts as its IPv4 address. Returns null for anything that is not an address.
+export function trialNetwork(raw: string): string | null {
+  const version = isIP(raw)
+  if (version === 4) return raw
+  if (version !== 6) return null
+  let host: string
+  try { host = new URL(`http://[${raw}]/`).hostname.slice(1, -1) } catch { return null }
+  const [head, tail] = host.split('::')
+  const start = head ? head.split(':') : []
+  const end = tail ? tail.split(':') : []
+  const groups = [...start, ...Array(8 - start.length - end.length).fill('0'), ...end].map((group) => parseInt(group, 16))
+  if (groups.length !== 8 || groups.some((group) => !Number.isInteger(group))) return null
+  if (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) {
+    return [groups[6] >> 8, groups[6] & 255, groups[7] >> 8, groups[7] & 255].join('.')
+  }
+  return `${groups.slice(0, 4).map((group) => group.toString(16)).join(':')}::/64`
+}
+
 // Vercel overwrites this header. Outside Vercel, only local development is
 // supported; accepting a caller's forwarded IP there would reset the allowance.
 export function trialIpHash(headers: Headers): string {
   const raw = process.env.VERCEL === '1' ? headers.get('x-forwarded-for')?.trim()
     : process.env.NODE_ENV === 'development' ? '127.0.0.1' : null
-  if (!raw || !isIP(raw)) throw new AuthError(503, 'Unable to verify the free prompt allowance')
-  const canonical = isIP(raw) === 6 ? new URL(`http://[${raw}]/`).hostname : raw
-  return createHmac('sha256', getSessionOptions().password as string).update(`fx0-trial:${canonical}`).digest('hex')
+  const network = raw ? trialNetwork(raw) : null
+  if (!network) throw new AuthError(503, 'Unable to verify the free prompt allowance')
+  return createHmac('sha256', getSessionOptions().password as string).update(`fx0-trial:${network}`).digest('hex')
 }
 
 export interface TrialReservation { bucket: string; clientId: string; token: string; remaining: number }

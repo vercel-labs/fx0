@@ -70,3 +70,20 @@ test('the picker\'s base model with fast on counts as the free-prompt model', as
   assert.equal(usesFreePrompts('anthropic/claude-opus-5.5', 'high', true), false)
   assert.equal(usesFreePrompts('anthropic/claude-sonnet-5.5', 'low', true), false)
 })
+
+test('every address in an IPv6 /64 shares one allowance; IPv4 and mapped IPv4 count per address', () => {
+  assert.equal(typeof trial.trialNetwork, 'function', 'allowance network is missing')
+  const network = trial.trialNetwork
+  const home = network('2001:db8:85a3:12::1')
+  assert.equal(home, '2001:db8:85a3:12::/64')
+  for (const address of ['2001:db8:85a3:12:ffff:ffff:ffff:ffff', '2001:0DB8:85A3:0012:a:b:c:d', '2001:db8:85a3:12:0:0:0:0']) {
+    assert.equal(network(address), home, address)
+  }
+  assert.notEqual(network('2001:db8:85a3:13::1'), home, 'the next /64 is another network')
+  assert.equal(network('::1'), '0:0:0:0::/64')
+  assert.equal(network('fe80::'), 'fe80:0:0:0::/64')
+  assert.equal(network('203.0.113.7'), '203.0.113.7')
+  assert.notEqual(network('203.0.113.8'), network('203.0.113.7'))
+  assert.equal(network('::ffff:203.0.113.7'), '203.0.113.7', 'a mapped IPv4 address is its IPv4 address')
+  for (const invalid of ['', 'not-an-ip', '2001:db8::1, 203.0.113.7', '999.0.0.1']) assert.equal(network(invalid), null, invalid)
+})

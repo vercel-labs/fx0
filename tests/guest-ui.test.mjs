@@ -270,13 +270,13 @@ test('stop says when there was no reply to stop, rather than claiming a stop was
   assert.equal(ui.requests.filter(({ url, init }) => url === '/api/cancel?session=trial-chat' && init?.method === 'POST').length, 2)
 })
 
-test('signed-in non-trial model settings explain team billing rather than claiming a free prompt', async (t) => {
+test('a signed-in user on the free-prompt model sees no free-prompt or billing notice', async (t) => {
   const ui = browser(t)
-  const app = mount(t, ui, { ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null }, sessionId: 'draft', freePrompts: 5 })
+  document.cookie = `fx0-model=${trialModel}`
+  const app = mount(t, ui, { ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null }, sessionId: 'draft', defaultModel: trialModel, freePrompts: 5 })
   await tick()
   app.render()
-  assert.ok(find(app.composerTree(), (node) => node.props?.role === 'status' && /Uses your billing team/.test([].concat(node.props.children)[0])))
-  assert.equal(find(app.composerTree(), (node) => node.props?.role === 'status' && /prompts? left/.test([].concat(node.props.children)[0])), null)
+  assert.equal(find(app.composerTree(), (node) => node.props?.role === 'status' && /Uses your billing team|prompts? left/.test([].concat(node.props.children)[0])), null)
 })
 
 test('a signed-in user with no free prompts left sees no billing notice', async (t) => {
@@ -287,7 +287,7 @@ test('a signed-in user with no free prompts left sees no billing notice', async 
   assert.equal(find(app.composerTree(), (node) => node.props?.role === 'status' && /Uses your billing team|prompts? left/.test([].concat(node.props.children)[0])), null)
 })
 
-test('an existing paid chat cannot claim free prompts; switching chats and new drafts keep the global allowance', async (t) => {
+test('a signed-in user sees no free-prompt notice in a paid chat, a former trial chat or a new design', async (t) => {
   const summary = (id, trial = false) => ({ id, title: id, createdAt: 1, lastActivity: 1, busy: false, ...(trial ? { trialChat: true } : {}) })
   const ui = browser(t, {
     '/api/events?session=paid-chat&after=1': () => new Response(''),
@@ -303,26 +303,16 @@ test('an existing paid chat cannot claim free prompts; switching chats and new d
   })
   await tick()
   app.render()
-  const freeNotice = () => find(app.composerTree(), (node) => node.props?.role === 'status' && /prompts? left/.test([].concat(node.props.children)[0]))
+  const notice = () => find(app.composerTree(), (node) => node.props?.role === 'status' && /prompts? left|billing team/.test([].concat(node.props.children)[0]))
   const rail = () => find(app.tree(), (node) => node.type === Sidebar).props
-  assert.equal(freeNotice(), null, 'an exact model match does not make a paid chat eligible')
-  assert.ok(find(app.composerTree(), (node) => node.props?.role === 'status' && /Uses your billing team/.test([].concat(node.props.children)[0])))
+  assert.equal(notice(), null, 'a paid chat')
   rail().onSelect('trial-chat')
   await tick()
   app.render()
-  assert.ok(freeNotice(), 'an uncached trial chat is eligible')
-  rail().onSelect('paid-chat')
-  await tick()
-  app.render()
-  assert.equal(freeNotice(), null, 'the cached paid chat stays paid')
+  assert.equal(notice(), null, 'a chat that began as a trial')
   rail().onNew()
   app.render()
-  assert.ok(freeNotice(), 'a new design retains the global allowance')
-  rail().onSelect('trial-chat')
-  await tick()
-  app.render()
-  assert.ok(freeNotice(), 'the cached trial chat retains its eligibility')
-  assert.equal(ui.requests.filter(({ url }) => url === '/api/session?session=trial-chat').length, 1)
+  assert.equal(notice(), null, 'a new design')
 })
 
 test('opening an uncached chat moves to its URL and an empty chat at once; a later click wins; a failed load returns to a new chat', async (t) => {
@@ -547,32 +537,6 @@ test('once idle, the three most recent other chats load in the background and th
   app.render()
   assert.equal(find(app.tree(), (node) => node.type === Transcript).props.entries[0]?.text, 'Design a')
   assert.equal(sessionRequests().filter((url) => url.endsWith('=a')).length, 1, 'opening it uses the background load')
-})
-
-test('the first prompt response retains trial eligibility when a signed-in draft becomes a cached chat', async (t) => {
-  t.mock.method(console, 'info', () => {})
-  const ui = browser(t, {
-    '/api/prompt?session=new': () => new Response('', { headers: { 'content-type': 'text/event-stream', 'x-fx0-session': 'admitted-trial', 'x-fx0-free-prompts': '4', 'x-fx0-trial-chat': '1' } }),
-    '/api/events?session=admitted-trial&after=0': () => new Response(''),
-  })
-  document.cookie = `fx0-model=${trialModel}`
-  const app = mount(t, ui, { ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null }, sessionId: 'draft', defaultModel: trialModel, freePrompts: 5 })
-  app.handle().restoreDraft({ text: 'Start a trial design', images: [] })
-  app.render()
-  app.send()
-  await tick()
-  app.render()
-  const freeNotice = () => find(app.composerTree(), (node) => node.props?.role === 'status' && [].concat(node.props.children)[0] === '4 free prompts left')
-  assert.equal(find(app.tree(), (node) => node.type === Transcript).props.sessionId, 'admitted-trial')
-  assert.ok(freeNotice(), 'the promoted chat must use the server admission header')
-  const rail = () => find(app.tree(), (node) => node.type === Sidebar).props
-  rail().onNew()
-  app.render()
-  rail().onSelect('admitted-trial')
-  await tick()
-  app.render()
-  assert.ok(freeNotice(), 'cache restoration must retain the first admission marker')
-  assert.equal(ui.requests.some(({ url }) => url === '/api/session?session=admitted-trial'), false)
 })
 
 // The browser pressing Back or Forward to `search`.

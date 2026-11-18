@@ -76,7 +76,9 @@ export const POST = withPromptRoute(async (request, context) => {
   }
   let reservation: TrialReservation | null = null
   let funding: TrialCredential | undefined
-  if (trialEnabled()) {
+  // Free prompts are a first taste for visitors without an account. A signed-in
+  // user always bills their own team, so they never spend or see the allowance.
+  if (guest && trialEnabled()) {
     const options = !existing ? { model: initial.preferredModel, effort: initial.preferredEffort, fast: initial.preferredFast, trialChat: true, unstarted: true }
       : await getSessionGenerationOptions(existing.host)
     const model = (options.unstarted ? initial.preferredModel : options.model) || (process.env.FX0_MODEL ?? DEFAULT_MODEL)
@@ -175,7 +177,6 @@ export const POST = withPromptRoute(async (request, context) => {
     headers: {
       // A chat created by this request tells the client its id before any event.
       ...(created ? { 'x-fx0-session': sessionId } : {}),
-      'x-fx0-trial-chat': submitted.trialChat ? '1' : '0',
       ...(reservation ? { 'x-fx0-free-prompts': String(reservation.remaining) } : {}),
       'content-type': 'text/event-stream',
       'cache-control': 'no-store',

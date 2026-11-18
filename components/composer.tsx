@@ -15,7 +15,7 @@ import { PROMPT_IMAGE_MAX_COUNT, PROMPT_IMAGES_MAX_BASE64, PROMPT_TEXT_LIMIT_ERR
 import { focusPrompt, registerPrompt } from '../lib/prompt-focus'
 import { Textarea } from './ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
-import { TRIAL_MODEL, usesFreePrompts } from '../lib/trial-policy'
+import { TRIAL_MODEL } from '../lib/trial-policy'
 import { Skeleton } from './ui/skeleton'
 
 // The model the page opens with, read on the server: the chat's stored settings,
@@ -125,20 +125,6 @@ interface TrialAccount {
   freePrompts?: number | null
 }
 
-interface TrialChatBoot {
-  sessionId: string
-  snapshot: { summary: { trialChat?: true } | null }
-}
-
-function FreePromptRegion({ boot, live, children }: {
-  boot: Promise<TrialChatBoot>
-  live: boolean | undefined
-  children: (eligible: boolean) => ReactNode
-}) {
-  const view = live === undefined ? use(boot) : null
-  return children(live ?? (view?.sessionId === 'draft' || view?.snapshot.summary?.trialChat === true))
-}
-
 // Only account-dependent controls suspend. The composer stays mounted so input
 // and attachments entered before the account arrives remain in place.
 function TrialRegion({ account, live, children }: {
@@ -210,8 +196,6 @@ export default function Composer({
   freePrompts,
   account,
   accountReady = false,
-  freePromptChat,
-  freePromptEligible,
   onSend,
   onStop,
   onNewSession,
@@ -232,8 +216,6 @@ export default function Composer({
   freePrompts?: number | null
   account?: Promise<TrialAccount>
   accountReady?: boolean
-  freePromptChat?: Promise<TrialChatBoot>
-  freePromptEligible?: boolean
   onSend: (text: string, images: AttachedImage[]) => boolean | void
   onStop: () => void
   onNewSession: () => void
@@ -1383,31 +1365,18 @@ export default function Composer({
           </div>
         </div>
 
-        {trialRegion((isTrial, remaining) => {
-          const renderNotice = (eligible: boolean) => {
-            const [notice, help] = remaining == null ? [null, null]
-              : isTrial && remaining === 0 ? ['Free prompts are used.', null]
-                : (isTrial || (eligible && usesFreePrompts(pickedModel, effort, fastOn))) && remaining > 0
-                  ? [`${remaining} free ${remaining === 1 ? 'prompt' : 'prompts'} left`, isTrial ? 'Runs Opus 5.5 Fast. Sign in to keep going.' : 'Runs Opus 5.5 Fast at low effort.']
-                  : remaining > 0 ? ['Uses your billing team.', 'Free prompts are available in a new Opus 5.5 Fast design.']
-                    : [null, null]
-            return notice && (
-              <p role="status" className="absolute bottom-full right-2 mb-2 flex items-center gap-1.5 border bg-background py-1 pl-2 pr-1.5 text-xs leading-4 text-muted-foreground sm:right-3">
-                {notice}
-                {isTrial && remaining === 0 && onSignIn && (
-                  <button type="button" {...fastClick(onSignIn)} className="text-foreground underline underline-offset-2 outline-none hover:no-underline focus-visible:ring-2 focus-visible:ring-ring">
-                    Sign in
-                  </button>
-                )}
-                {help && <FreePromptHelp help={help} onSignIn={isTrial ? onSignIn : undefined} />}
-              </p>
-            )
-          }
-          if (isTrial || !freePromptChat) return renderNotice(freePromptEligible ?? sessionId === 'draft')
-          return <Suspense fallback={renderNotice(freePromptEligible ?? false)}>
-            <FreePromptRegion boot={freePromptChat} live={freePromptEligible}>{renderNotice}</FreePromptRegion>
-          </Suspense>
-        })}
+        {/* Only a visitor without an account has free prompts; a signed-in user bills their team. */}
+        {trialRegion((isTrial, remaining) => isTrial && remaining != null && (
+          <p role="status" className="absolute bottom-full right-2 mb-2 flex items-center gap-1.5 border bg-background py-1 pl-2 pr-1.5 text-xs leading-4 text-muted-foreground sm:right-3">
+            {remaining === 0 ? 'Free prompts are used.' : `${remaining} free ${remaining === 1 ? 'prompt' : 'prompts'} left`}
+            {remaining === 0 && onSignIn && (
+              <button type="button" {...fastClick(onSignIn)} className="text-foreground underline underline-offset-2 outline-none hover:no-underline focus-visible:ring-2 focus-visible:ring-ring">
+                Sign in
+              </button>
+            )}
+            {remaining > 0 && <FreePromptHelp help="Runs Opus 5.5 Fast. Sign in to keep going." onSignIn={onSignIn} />}
+          </p>
+        ))}
         <div
           aria-live="polite"
           className={

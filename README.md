@@ -9,7 +9,7 @@ Try it at [fx0.vercel.dev](https://fx0.vercel.dev), or clone it and make it your
 ## Features
 
 - Sign in with Vercel to bill model calls through [AI Gateway](https://vercel.com/docs/ai-gateway) to your own team.
-- Optionally offer five free Opus 5.5 Fast prompts per IP without sign-in or a card. [BotID](https://vercel.com/docs/botid) protects the trial; a server-only Gateway key funds its admitted prompts.
+- Optionally offer visitors without an account five free Opus 5.5 Fast prompts per network, without sign-in or a card. [BotID](https://vercel.com/docs/botid) protects the trial; a server-only Gateway key funds its admitted prompts.
 - A chat survives the function dying mid-reply: the turn continues where it stopped. See [Durability](#durability).
 - Every turn keeps its version of the design. You can reopen any of them and copy or download the HTML.
 - Pick each chat's model, with its reasoning effort and fast mode. New chats start on fast Claude Opus 5.5, or on `FX0_MODEL` when it's set.
@@ -112,7 +112,7 @@ You can watch this happen. Open session diagnostics from the header to see the c
 - If a prompt request crashes while it runs its turn, for example by running out of memory, the turn continues about 13 minutes after the send, however early the crash came. On Vercel, libfx can't tell a crashed function from a slow one, so a crashed request still holds the session until its 800-second limit, and the prompt's backstop takes over 5 seconds later. The page keeps showing the reply as running meanwhile. A turn that only runs long isn't affected: libfx stops it 30 seconds before the limit and queues the rest at once for a delivery to `/api/libfx`.
 - A text message sent while a tool runs, such as while a design is being written, waits for that tool before the model sees it. A message with images runs as its own turn, after any running turn finishes.
 - Every turn bills the login and team that sent the message that started it; a later message cannot change an earlier turn's funding. A text message that joins a running turn is billed to that turn. Token renewal from the same login keeps the turn's billing team.
-- Free prompts start in a new design on Opus 5.5 Fast with low effort. Existing paid-only chats keep their own billing. The allowance is five per IP across chats and browsers, with no periodic refill; clearing cookies does not reset it. After it is used, sign in to continue with your own team.
+- Free prompts are only for visitors who have not signed in. They start in a new design on Opus 5.5 Fast with low effort. A signed-in user always bills their own team and is never offered free prompts, including in chats that began as a trial. The allowance is five per network across chats and browsers, with no periodic refill: one IPv4 address, or one IPv6 /64, since a connection can send from any address in its /64. Clearing cookies does not reset it. After it is used, sign in to continue with your own team.
 - Published previews update compatible stylesheets, inline styles on uniquely identified elements, and identified leaf text without restarting their scripts. Unedited inputs, listeners, and runtime state stay in place. Changes to scripts, structure, unsupported fields, or conflicting runtime values reload the preview instead. A published design stays visible while its next revision is prepared.
 - A design being written streams through a bounded, expiring Redis channel, so viewers on other instances can see it too. Reconnecting resumes from the full prefix; generation IDs and offsets prevent duplicated bytes. The provisional preview strips active markup and runs without scripts. Publishing or ending a turn closes its draft before it can replace the finished preview.
 - Deleting a chat removes fx0's records and credential. libfx's session data expires with the World's retention.
@@ -128,7 +128,7 @@ You can watch this happen. Open session diagnostics from the header to see the c
 | [`lib/libfx-agent.ts`](lib/libfx-agent.ts) | The durable agent, its per-chat `fetch` and its tools |
 | [`lib/projector.ts`](lib/projector.ts) | Copies a chat's libfx stream into its transcript |
 | [`lib/turn-credential.ts`](lib/turn-credential.ts) | The sealed credential each chat's turns bill |
-| [`lib/trial.ts`](lib/trial.ts) | Guest identities and the atomic per-IP trial allowance |
+| [`lib/trial.ts`](lib/trial.ts) | Guest identities and the atomic per-network trial allowance |
 | [`lib/journal.ts`](lib/journal.ts) | The Redis journal. Every write is a single Lua script, so it's atomic. |
 | [`app/api/libfx/`](app/api/libfx) | Where Vercel Queues delivers libfx's turns |
 | [`lib/tools.ts`](lib/tools.ts) | The agent's tools: read, publish and edit the design, fetch a URL, ask a question, page through a long tool result, search the available tools and start a subagent. AI Gateway's web search runs beside them. |
