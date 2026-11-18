@@ -90,19 +90,17 @@ test('trial first paint offers sign-in, free prompts and a fixed model while ret
   assert.match(markup, /\/api\/artifact-frame\?session=trial-chat&amp;v=2/)
 })
 
-test('signed-in first paint offers free prompts only for an eligible chat', () => {
+test('signed-in first paint shows no free-prompt notice, even for a chat that began as a trial', () => {
   for (const trialChat of [false, true]) {
     const summary = { id: 'existing-chat', title: 'Existing design', createdAt: 1, lastActivity: 1, busy: false, ...(trialChat ? { trialChat: true } : {}) }
-    const markup = renderToStaticMarkup(createElement(TooltipProvider, null, createElement(ChatApp, {
-      account: resolved({ user: { id: 'user-1', name: 'User', email: null, picture: null }, team: null, freePrompts: 3 }),
-      sidebar: resolved({ sessions: [summary], nextCursor: null }),
-      boot: resolved({ sessionId: 'existing-chat', snapshot: { transcript: compactTranscript([], { artifactRevision: 0 }), summary }, now: 1, missing: false }),
-      defaultModel: 'anthropic/claude-opus-5.5-fast',
-    })))
-    if (trialChat) assert.match(markup, /3 free prompts left/)
-    else {
-      assert.doesNotMatch(markup, /3 free prompts left/)
-      assert.match(markup, /Uses your billing team/)
+    for (const sessionId of ['existing-chat', 'draft']) {
+      const markup = renderToStaticMarkup(createElement(TooltipProvider, null, createElement(ChatApp, {
+        account: resolved({ user: { id: 'user-1', name: 'User', email: null, picture: null }, team: null, freePrompts: 3 }),
+        sidebar: resolved({ sessions: [summary], nextCursor: null }),
+        boot: resolved({ sessionId, snapshot: { transcript: compactTranscript([], { artifactRevision: 0 }), summary: sessionId === 'draft' ? null : summary }, now: 1, missing: false }),
+        defaultModel: 'anthropic/claude-opus-5.5-fast',
+      })))
+      assert.doesNotMatch(markup, /free prompt|billing team/)
     }
   }
 })

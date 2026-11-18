@@ -15,13 +15,14 @@ import { claimGuestSessions } from '../lib/accounts'
 async function loadAccount(): Promise<AccountBoot> {
   await connection()
   const guest = await getGuestSession()
-  const freePrompts = trialEnabled() ? await remainingFreePrompts(await headers()).catch(() => null) : null
   try {
     const session = await requireUserSession()
     if (guest) await claimGuestSessions(guest.userId, session.userId)
-    return { user: publicUser(session), team: session.teamSlug || session.teamId || null, freePrompts }
+    return { user: publicUser(session), team: session.teamSlug || session.teamId || null, freePrompts: null }
   } catch (error) {
     if (!(error instanceof AuthError) || error.status !== 401) throw error
+    // Only a visitor without an account is offered free prompts.
+    const freePrompts = trialEnabled() ? await remainingFreePrompts(await headers()).catch(() => null) : null
     return { user: guest ? guestUser(guest) : freePrompts !== null
       ? { id: 'guest:new', name: 'You', email: null, picture: null, guest: true } : null, team: null, freePrompts }
   }

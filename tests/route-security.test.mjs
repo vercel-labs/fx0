@@ -299,33 +299,25 @@ test('a human without OAuth can send five sponsored prompts, and the sixth never
   assert.equal(state.trace.filter(x => x === 'prompt').length, before)
 })
 
-test('sponsorship also covers a signed-in default-model user, while other models stay on user billing', async () => {
-  const state = reset({ trialEnabled: true, generationOptions: { model: 'anthropic/claude-opus-5.5-fast', effort: 'low', fast: true } })
-  let response = await routes.prompt.POST(request('prompt', 'POST', 'new', { text: 'Hi', clientId: 'signed-in', generation: { model: 'anthropic/claude-opus-5.5-fast' } }))
+test('a signed-in user bills their own team on every model, in a new, reserved or existing chat', async () => {
+  const freeModel = { model: 'anthropic/claude-opus-5.5-fast', effort: 'low', fast: true }
+  const state = reset({ trialEnabled: true, generationOptions: { ...freeModel, unstarted: true } })
+  let response = await routes.prompt.POST(request('prompt', 'POST', 'new', { text: 'Hi', clientId: 'signed-in', generation: freeModel }))
   assert.equal(response.status, 200)
-  assert.equal(state.funding?.kind, 'trial')
-  assert.equal(state.funding?.userId, state.session.userId)
+  assert.equal(response.headers.get('x-fx0-free-prompts'), null)
+  assert.equal(state.funding, undefined)
+  await response.text()
+  const reserved = await routes.sessions.POST(request('sessions', 'POST', null))
+  const { id } = await reserved.json()
+  response = await routes.prompt.POST(request('prompt', 'POST', id, { text: 'Hi', clientId: 'reserved', generation: freeModel }))
+  assert.equal(response.status, 200)
+  assert.equal(state.funding, undefined)
   await response.text()
   response = await routes.prompt.POST(request('prompt', 'POST', own, { text: 'Paid history stays paid', clientId: 'existing-paid' }))
   assert.equal(response.status, 200)
   assert.equal(state.funding, undefined)
   await response.text()
-  response = await routes.prompt.POST(request('prompt', 'POST', 'new', { text: 'Hi', clientId: 'paid', generation: { model: 'another/model' } }))
-  assert.equal(response.status, 200)
-  assert.equal(state.funding, undefined)
-  assert.equal(state.trialUsed, 1)
-  await response.text()
-})
-
-test('a chat reserved while typing still receives its first free prompt with the submitted draft settings', async () => {
-  const state = reset({ trialEnabled: true, generationOptions: { model: '', effort: '', fast: false, unstarted: true } })
-  const reserved = await routes.sessions.POST(request('sessions', 'POST', null))
-  const { id } = await reserved.json()
-  const response = await routes.prompt.POST(request('prompt', 'POST', id, { text: 'Hi', clientId: 'reserved-free', generation: { model: 'anthropic/claude-opus-5.5-fast' } }))
-  assert.equal(response.status, 200)
-  assert.equal(state.funding?.kind, 'trial')
-  assert.equal(state.trialUsed, 1)
-  await response.text()
+  assert.equal(state.trialUsed ?? 0, 0, 'a signed-in user never spends the visitor allowance')
 })
 
 test('rejected guest input creates no ownership row or runtime, and a failed reservation refunds its free slot', async () => {
@@ -1191,6 +1183,13 @@ test('a fresh trial visitor sees five prompts without account or ownership datab
   assert.deepEqual(rendered.sessions, [])
   assert.deepEqual(state.queries, [])
   assert.deepEqual(state.redisReads, [])
+})
+
+test('a signed-in page is offered no free prompts while the trial is on', async () => {
+  reset({ trialEnabled: true })
+  const rendered = await boot({ searchParams: Promise.resolve({}) })
+  assert.equal(rendered.user.id, 'user_a')
+  assert.equal(rendered.freePrompts, null)
 })
 
 test('page boot carries only public user fields and owned lists', async () => {

@@ -236,7 +236,6 @@ function withCurrentSession(
     createdAt: current?.createdAt ?? firstUser?.at ?? now,
     lastActivity: current || events.length > 0 ? Math.max(current?.lastActivity ?? 0, lastPromptAt) : now,
     busy: replayed.activeTurnId != null,
-    ...(current?.trialChat ? { trialChat: true } : {}),
   }
   const next = current
     ? sessions.map((session) => (session.id === sessionId ? summary : session))
@@ -277,7 +276,6 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   const [team, setTeam] = useState<string | null>(null)
   const [freePrompts, setFreePrompts] = useState<number | null>(null)
   const [sessionId, setSessionId] = useState('draft')
-  const [trialChat, setTrialChat] = useState(false)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [entries, setEntries] = useState<ChatEntry[]>(initialState.entries)
   const [artifactRevision, setArtifactRevision] = useState(initialState.view.artifactRevision)
@@ -1063,7 +1061,6 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     setStartedTurns(state.startedTurns)
     setStreamStartSeq(state.lastSeq)
     setSessionId(id)
-    setTrialChat(snapshot.summary?.trialChat === true)
     setSessions((previous) => snapshot.summary && state.entries.length ? mergeSessions(previous, [snapshot.summary]) : previous)
   }
 
@@ -1173,7 +1170,6 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     setDebugOpen(false)
     setChatMenuOpen(false)
     setSessionId('draft')
-    setTrialChat(false)
     activeSession.current = 'draft'
     currentView.current = DEFAULT_VIEW
     // A draft is a chat with no events. Reset the per-chat stream state the way
@@ -1457,16 +1453,13 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
       if (creating) {
         const created = reservedId ?? response.headers.get('x-fx0-session')
         if (!created) throw new Error('the server did not return the new chat id')
-        const admittedTrialChat = response.headers.get('x-fx0-trial-chat') === '1'
         createdSummary = withCurrentSession([], created, acceptedAt, [acceptedUser], DEFAULT_VIEW)[0]
-        if (admittedTrialChat) createdSummary.trialChat = true
         // Promote the draft in place, unless the user already moved elsewhere.
         cacheSession(created, { transcript: compactTranscript([], DEFAULT_VIEW), summary: createdSummary })
         setActivityStarts((starts) => renameActivity(starts, targetSession, created))
         if (activeSession.current === targetSession) {
           activeSession.current = created
           setSessionId(created)
-          setTrialChat(admittedTrialChat)
           const url = new URL(window.location.href)
           url.searchParams.set('s', created)
           window.history.replaceState(null, '', url)
@@ -2108,8 +2101,6 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
               freePrompts={freePrompts}
               account={account}
               accountReady={user !== undefined}
-              freePromptChat={boot}
-              freePromptEligible={chatReady ? sessionId === 'draft' || trialChat : undefined}
               busy={activeTurnId != null}
               stopping={stopPending}
               sessionId={sessionId}
